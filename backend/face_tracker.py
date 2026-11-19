@@ -302,9 +302,9 @@ def init_db():
             created_at TEXT
         )
     ''')
-    cur.execute("INSERT OR IGNORE INTO orgs (id, name, industry, created_at) VALUES ('medanta', 'Medanta Hospital', 'Healthcare', datetime('now'))")
-    cur.execute("INSERT OR IGNORE INTO orgs (id, name, industry, created_at) VALUES ('default', 'Corporate Demo Org', 'Corporate', datetime('now'))")
-    cur.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('active_org_id', 'default')")
+    cur.execute("INSERT OR IGNORE INTO orgs (id, name, industry, created_at) VALUES ('medanta', 'Demo Hospital', 'Healthcare', datetime('now'))")
+    cur.execute("INSERT OR IGNORE INTO orgs (id, name, industry, created_at) VALUES ('bellwether', 'Bellwether', 'Corporate', datetime('now'))")
+    cur.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('active_org_id', 'bellwether')")
 
     # Add org_id to daily_attendance, visitor_sightings, blacklist_watchlist, cameras
     for tbl in [
@@ -2284,7 +2284,7 @@ class FaceTrackerEngine:
                     'crops': crops,
                     'last_camera': r[9] if len(r) > 9 else 'main',
                     'previous_camera': r[10] if len(r) > 10 else None,
-                    'org_id': r[16] if len(r) > 16 and r[16] else 'medanta'
+                    'org_id': r[16] if len(r) > 16 and r[16] else 'bellwether'
                 }
                 self.unique_cache.append(vis_obj)
                 self.unique_cache_by_id[vis_id] = vis_obj
@@ -3272,8 +3272,8 @@ class FaceTrackerEngine:
             return False, str(e)
 
     def delete_org(self, org_id: str):
-        """Delete an organization (must not be 'default' or 'medanta')."""
-        if org_id in ('default', 'medanta'):
+        """Delete an organization (must not be 'default', 'bellwether', or 'medanta')."""
+        if org_id in ('default', 'medanta', 'bellwether'):
             return False, "Cannot delete built-in organizations"
         try:
             conn = sqlite3.connect(DB_PATH, timeout=10.0)
@@ -3293,9 +3293,9 @@ class FaceTrackerEngine:
             cur.execute("SELECT value FROM system_settings WHERE key = 'active_org_id'")
             row = cur.fetchone()
             conn.close()
-            return row[0] if row else 'default'
+            return row[0] if (row and row[0]) else 'bellwether'
         except Exception:
-            return 'default'
+            return 'bellwether'
 
     def set_active_org(self, org_id: str):
         """Set the active org."""
@@ -4276,7 +4276,12 @@ class FaceTrackerEngine:
         if org_id is None:
             org_id = self.get_active_org()
         if org_id and org_id != 'all':
-            org_where = f"WHERE (u.org_id = '{org_id}' OR ('{org_id}' = 'medanta' AND (u.org_id IS NULL OR u.org_id = '')))"
+            if org_id in ('bellwether', 'default'):
+                org_where = "WHERE (u.org_id IN ('bellwether', 'default'))"
+            elif org_id == 'medanta':
+                org_where = "WHERE (u.org_id = 'medanta' OR u.org_id IS NULL OR u.org_id = '')"
+            else:
+                org_where = f"WHERE (u.org_id = '{org_id}')"
         else:
             org_where = ""
 
@@ -4330,8 +4335,15 @@ class FaceTrackerEngine:
         if org_id is None:
             org_id = self.get_active_org()
         if org_id and org_id != 'all':
-            org_uv = f"(org_id = '{org_id}' OR ('{org_id}' = 'medanta' AND (org_id IS NULL OR org_id = '')))"
-            org_da = f"(org_id = '{org_id}' OR ('{org_id}' = 'medanta' AND (org_id IS NULL OR org_id = '')))"
+            if org_id in ('bellwether', 'default'):
+                org_uv = "org_id IN ('bellwether', 'default')"
+                org_da = "org_id IN ('bellwether', 'default')"
+            elif org_id == 'medanta':
+                org_uv = "(org_id = 'medanta' OR org_id IS NULL OR org_id = '')"
+                org_da = "(org_id = 'medanta' OR org_id IS NULL OR org_id = '')"
+            else:
+                org_uv = f"(org_id = '{org_id}')"
+                org_da = f"(org_id = '{org_id}')"
         else:
             org_uv = "1=1"
             org_da = "1=1"
@@ -4552,7 +4564,12 @@ class FaceTrackerEngine:
         if org_id is None:
             org_id = self.get_active_org()
         if org_id and org_id != 'all':
-            org_filter = f"AND (u.org_id = '{org_id}' OR ('{org_id}' = 'medanta' AND (u.org_id IS NULL OR u.org_id = '')))"
+            if org_id in ('bellwether', 'default'):
+                org_filter = "AND u.org_id IN ('bellwether', 'default')"
+            elif org_id == 'medanta':
+                org_filter = "AND (u.org_id = 'medanta' OR u.org_id IS NULL OR u.org_id = '')"
+            else:
+                org_filter = f"AND u.org_id = '{org_id}'"
         else:
             org_filter = ""
         chart_data = []
@@ -4680,8 +4697,15 @@ class FaceTrackerEngine:
         if org_id is None:
             org_id = self.get_active_org()
         if org_id and org_id != 'all':
-            org_filter_uv = f"(uv.org_id = '{org_id}' OR ('{org_id}' = 'medanta' AND (uv.org_id IS NULL OR uv.org_id = '')))"
-            org_filter_u = f"(org_id = '{org_id}' OR ('{org_id}' = 'medanta' AND (org_id IS NULL OR org_id = '')))"
+            if org_id in ('bellwether', 'default'):
+                org_filter_uv = "uv.org_id IN ('bellwether', 'default')"
+                org_filter_u = "org_id IN ('bellwether', 'default')"
+            elif org_id == 'medanta':
+                org_filter_uv = "(uv.org_id = 'medanta' OR uv.org_id IS NULL OR uv.org_id = '')"
+                org_filter_u = "(org_id = 'medanta' OR org_id IS NULL OR org_id = '')"
+            else:
+                org_filter_uv = f"(uv.org_id = '{org_id}')"
+                org_filter_u = f"(org_id = '{org_id}')"
         else:
             org_filter_uv = "1=1"
             org_filter_u = "1=1"

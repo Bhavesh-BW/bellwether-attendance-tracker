@@ -49,8 +49,8 @@ export default function App() {
   const [registrySection, setRegistrySection] = useState('details');
   const [loading, setLoading] = useState(true);
   const [orgs, setOrgs] = useState([]);
-  const [activeOrgId, setActiveOrgId] = useState('medanta');
-  const activeOrgIdRef = useRef('medanta');
+  const [activeOrgId, setActiveOrgId] = useState('bellwether');
+  const activeOrgIdRef = useRef('bellwether');
   const [showAddOrgModal, setShowAddOrgModal] = useState(false);
   const [newOrgName, setNewOrgName] = useState('');
   const [newOrgIndustry, setNewOrgIndustry] = useState('Corporate');
@@ -63,7 +63,7 @@ export default function App() {
   const fetchData = useCallback(async () => {
     try {
       const currentRange = trendRangeRef.current || 'today';
-      const currentOrg = activeOrgIdRef.current || 'medanta';
+      const currentOrg = activeOrgIdRef.current || 'bellwether';
       const ts = Date.now();
       const [kpiRes, camRes, trendRes, visRes, watchRes, alertRes, orgRes] = await Promise.all([
         fetch(`/api/kpis?range=${encodeURIComponent(currentRange)}&org_id=${encodeURIComponent(currentOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
@@ -91,8 +91,8 @@ export default function App() {
       if (alertRes) setAlerts(alertRes);
       if (orgRes?.orgs) {
         setOrgs(orgRes.orgs);
-        if (!activeOrgIdRef.current || activeOrgIdRef.current === 'default') {
-          const srvOrg = orgRes.active_org_id || 'medanta';
+        if (orgRes.active_org_id && orgRes.active_org_id !== activeOrgIdRef.current && !localStorage.getItem('user_switched_org')) {
+          const srvOrg = orgRes.active_org_id;
           setActiveOrgId(srvOrg);
           activeOrgIdRef.current = srvOrg;
         }
