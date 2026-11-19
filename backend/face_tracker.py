@@ -184,7 +184,8 @@ def init_db():
         ('designation', "TEXT DEFAULT 'Staff Member'"),
         ('is_enrolled', 'INTEGER DEFAULT 0'),
         ('enrollment_date', 'TEXT'),
-        ('org_id', "TEXT DEFAULT 'medanta'")
+        ('org_id', "TEXT DEFAULT 'medanta'"),
+        ('restricted_cameras', "TEXT DEFAULT '[]'")
     ]:
         try:
             cur.execute(f'ALTER TABLE unique_visitors ADD COLUMN {col[0]} {col[1]}')
@@ -254,6 +255,35 @@ def init_db():
             cur.execute(f'ALTER TABLE security_alerts ADD COLUMN {col[0]} {col[1]}')
         except Exception:
             pass
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS zone_intrusions (
+            id TEXT PRIMARY KEY,
+            employee_id TEXT,
+            employee_name TEXT,
+            department TEXT,
+            camera_id TEXT,
+            camera_name TEXT,
+            timestamp TEXT,
+            date TEXT,
+            dwell_seconds INTEGER DEFAULT 0,
+            dwell_str TEXT DEFAULT '< 1m',
+            face_crop_b64 TEXT,
+            status TEXT DEFAULT 'active',
+            org_id TEXT DEFAULT 'bellwether',
+            acknowledged_at TEXT,
+            acknowledged_by TEXT
+        )
+    ''')
+    for col in [('org_id', "TEXT DEFAULT 'bellwether'"), ('face_crop_b64', 'TEXT')]:
+        try:
+            cur.execute(f'ALTER TABLE zone_intrusions ADD COLUMN {col[0]} {col[1]}')
+        except Exception:
+            pass
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_zi_date ON zone_intrusions (date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_zi_emp ON zone_intrusions (employee_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_zi_org ON zone_intrusions (org_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_zi_status ON zone_intrusions (status)")
 
     cur.execute('''
         CREATE TABLE IF NOT EXISTS daily_attendance (
@@ -1476,6 +1506,45 @@ class CameraStreamPipeline:
                             now_iso
                         ))
 
+            # Check Zone Intrusion for Employee / Visitor
+            is_zone_intrusion = False
+            target_profile = matched_visitor or self.engine.unique_cache_by_id.get(visitor_id)
+            if target_profile:
+                restr_cams = target_profile.get('restricted_cameras') or []
+                if isinstance(restr_cams, str):
+                    try:
+                        restr_cams = json.loads(restr_cams)
+                    except Exception:
+                        restr_cams = []
+                is_zone_intrusion = bool(
+                    self.camera_id in restr_cams or 
+                    getattr(self, 'name', '') in restr_cams or 
+                    any(c.lower() in (self.camera_id.lower(), getattr(self, 'name', '').lower()) for c in restr_cams if isinstance(c, str))
+                )
+                if is_zone_intrusion:
+                    now_ep = time.time()
+                    int_key = (visitor_id, self.camera_id)
+                    last_int_ts = getattr(self.engine, 'last_zone_intrusion_time', {}).get(int_key, 0)
+                    if (now_ep - last_int_ts) > 120.0:
+                        if not hasattr(self.engine, 'last_zone_intrusion_time'):
+                            self.engine.last_zone_intrusion_time = {}
+                        self.engine.last_zone_intrusion_time[int_key] = now_ep
+                        int_id = f"ZON-{uuid.uuid4().hex[:8].upper()}"
+                        int_photo = get_photo_b64() or target_profile.get('photo_b64')
+                        emp_n = target_profile.get('name') or visitor_id
+                        emp_dept = target_profile.get('department') or 'General Staff'
+                        self.engine.log_zone_intrusion(
+                            intrusion_id=int_id,
+                            employee_id=visitor_id,
+                            employee_name=emp_n,
+                            department=emp_dept,
+                            camera_id=self.camera_id,
+                            camera_name=self.name,
+                            timestamp=now_iso,
+                            date=get_ist_date_str(),
+                            photo_b64=int_photo
+                        )
+
             if best_track_id is not None and best_track_id in self.active_tracks:
                 track_id = best_track_id
                 trk = self.active_tracks[track_id]
@@ -1487,6 +1556,7 @@ class CameraStreamPipeline:
                 trk['prev_camera_name'] = prev_cam_name
                 trk['gender'] = gender
                 trk['age'] = age
+                trk['is_zone_intrusion'] = is_zone_intrusion
             else:
                 # Create New Track for newly registered or matched person
                 track_id = self.next_track_id
@@ -1506,7 +1576,8 @@ class CameraStreamPipeline:
                     'is_transit': is_transit,
                     'prev_camera_name': prev_cam_name,
                     'gender': gender,
-                    'age': age
+                    'age': age,
+                    'is_zone_intrusion': is_zone_intrusion
                 }
             matched_track_ids.add(track_id)
 
@@ -1550,10 +1621,25 @@ class CameraStreamPipeline:
             emp_display_title = reg_name if is_enrolled_person else t_vid
             is_camera_exit = (getattr(self, 'role', None) == 'exit') if getattr(self, 'role', None) else ('exit' in self.camera_id.lower() or 'exit' in self.name.lower())
 
+            restr_cams = v_profile.get('restricted_cameras') or []
+            if isinstance(restr_cams, str):
+                try: restr_cams = json.loads(restr_cams)
+                except Exception: restr_cams = []
+            is_zone_intrusion = bool(
+                self.camera_id in restr_cams or 
+                getattr(self, 'name', '') in restr_cams or 
+                any(c.lower() in (self.camera_id.lower(), getattr(self, 'name', '').lower()) for c in restr_cams if isinstance(c, str))
+            )
+            trk['is_zone_intrusion'] = is_zone_intrusion
+
             if t_blacklisted:
                 color = (30, 30, 235)  # Crimson Red
                 tag = f"SECURITY ALERT: {t_threat or emp_display_title}"
                 tag_bg = (20, 20, 180)
+            elif is_zone_intrusion:
+                color = (30, 30, 235)  # Alert Red Bounding Box
+                tag = f"RESTRICTED INTRUSION: {emp_display_title.upper()}"
+                tag_bg = (20, 20, 200)
             elif is_camera_exit or t_vid == 'UNTRACKED_EXIT':
                 color = (240, 140, 30)  # Sky Cyan Blue / Departure
                 if is_enrolled_person:
@@ -1702,6 +1788,7 @@ class FaceTrackerEngine:
         self.attendance_cooldowns = {}
         self.sighting_cooldowns = {}
         self.transit_cooldowns = {}
+        self.last_zone_intrusion_time = {}
         self.active_camera_sessions = {}
         self.recent_auto_enrolled = collections.deque(maxlen=30)
 
@@ -2206,9 +2293,9 @@ class FaceTrackerEngine:
         self.unique_cache_by_id = {}
         self.locked_genders = set()
         try:
-            cur.execute('SELECT id, gender, embedding_json, last_seen, photo_b64, crops_json, gender_locked, is_blacklisted, blacklist_reason, last_camera, previous_camera, emp_code, name, department, designation, is_enrolled, COALESCE(org_id, "medanta") FROM unique_visitors WHERE (photo_b64 IS NOT NULL AND photo_b64 != "") OR is_enrolled = 1 OR id LIKE "EMP-%"')
+            cur.execute('SELECT id, gender, embedding_json, last_seen, photo_b64, crops_json, gender_locked, is_blacklisted, blacklist_reason, last_camera, previous_camera, emp_code, name, department, designation, is_enrolled, COALESCE(org_id, "medanta"), restricted_cameras FROM unique_visitors WHERE (photo_b64 IS NOT NULL AND photo_b64 != "") OR is_enrolled = 1 OR id LIKE "EMP-%"')
         except Exception:
-            cur.execute('SELECT id, gender, embedding_json, last_seen, photo_b64, crops_json, 0, 0, NULL, "main", NULL, id, NULL, "General Staff", "Staff Member", 0, "medanta" FROM unique_visitors')
+            cur.execute('SELECT id, gender, embedding_json, last_seen, photo_b64, crops_json, 0, 0, NULL, "main", NULL, id, NULL, "General Staff", "Staff Member", 0, "medanta", "[]" FROM unique_visitors')
         for r in cur.fetchall():
             vis_id = r[0]
             emb = np.array(json.loads(r[2]), dtype=np.float32) if r[2] else None
@@ -2239,6 +2326,11 @@ class FaceTrackerEngine:
             dept = r[13] if len(r) > 13 and r[13] else 'General Staff'
             desig = r[14] if len(r) > 14 and r[14] else 'Staff Member'
             enr = bool(r[15]) if len(r) > 15 and r[15] is not None else bool(r_name)
+            restr_raw = r[17] if len(r) > 17 and r[17] else '[]'
+            try:
+                restr_cams = json.loads(restr_raw) if isinstance(restr_raw, str) else list(restr_raw)
+            except Exception:
+                restr_cams = []
 
             expected_dim = 512 if getattr(self, 'arcface_sess', None) is not None else 128
             if emb is not None:
@@ -2288,7 +2380,8 @@ class FaceTrackerEngine:
                     'crops': crops,
                     'last_camera': r[9] if len(r) > 9 else 'main',
                     'previous_camera': r[10] if len(r) > 10 else None,
-                    'org_id': r[16] if len(r) > 16 and r[16] else 'bellwether'
+                    'org_id': r[16] if len(r) > 16 and r[16] else 'bellwether',
+                    'restricted_cameras': restr_cams
                 }
                 self.unique_cache.append(vis_obj)
                 self.unique_cache_by_id[vis_id] = vis_obj
@@ -5675,6 +5768,7 @@ class FaceTrackerEngine:
                 'days_present_30d': stats_30d.get('days_present') if stats_30d else 0,
                 'avg_time_spent_30d': stats_30d.get('avg_daily_time_str') if stats_30d else '0h 00m',
                 'attendance_pct_30d': stats_30d.get('attendance_pct') if stats_30d else 0.0,
+                'restricted_cameras': v_mem.get('restricted_cameras') or [],
                 'stats_30d': stats_30d
             })
         conn.close()
@@ -5740,6 +5834,97 @@ class FaceTrackerEngine:
             })
         conn.close()
         return rows
+
+    def log_zone_intrusion(self, intrusion_id: str, employee_id: str, employee_name: str, department: str, camera_id: str, camera_name: str, timestamp: str, date: str, photo_b64: str = None, org_id: str = None):
+        if not org_id:
+            org_id = self.get_active_org()
+        self.async_db_execute("""
+            INSERT INTO zone_intrusions (id, employee_id, employee_name, department, camera_id, camera_name, timestamp, date, dwell_seconds, dwell_str, face_crop_b64, status, org_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '< 1m', ?, 'active', ?)
+        """, (intrusion_id, employee_id, employee_name, department, camera_id, camera_name, timestamp, date, photo_b64 or '', org_id))
+
+        payload = {
+            'id': intrusion_id,
+            'employee_id': employee_id,
+            'employee_name': employee_name,
+            'department': department,
+            'camera_id': camera_id,
+            'camera_name': camera_name,
+            'timestamp': timestamp,
+            'date': date,
+            'face_crop_b64': photo_b64 or '',
+            'status': 'active',
+            '_event_type': 'zone_intrusion'
+        }
+        self._broadcast_alert(payload)
+
+    def get_zone_intrusions(self, org_id=None, date_str=None, limit=100, status_filter=None):
+        if org_id is None:
+            org_id = self.get_active_org()
+        conn = sqlite3.connect(DB_PATH, timeout=20.0)
+        cur = conn.cursor()
+        query = "SELECT id, employee_id, employee_name, department, camera_id, camera_name, timestamp, date, dwell_seconds, dwell_str, face_crop_b64, status, acknowledged_at, acknowledged_by FROM zone_intrusions WHERE 1=1"
+        params = []
+        if org_id and org_id != 'all':
+            if org_id in ('bellwether', 'default'):
+                query += " AND (org_id IN ('bellwether', 'default') OR org_id IS NULL OR org_id = '')"
+            elif org_id == 'medanta':
+                query += " AND org_id = 'medanta'"
+            else:
+                query += " AND org_id = ?"
+                params.append(org_id)
+        if date_str:
+            query += " AND date = ?"
+            params.append(date_str)
+        if status_filter and str(status_filter).lower() != 'all':
+            query += " AND status = ?"
+            params.append(str(status_filter).lower())
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        cur.execute(query, tuple(params))
+        rows = []
+        for r in cur.fetchall():
+            rows.append({
+                'id': r[0],
+                'employee_id': r[1],
+                'employee_name': r[2],
+                'department': r[3],
+                'camera_id': r[4],
+                'camera_name': r[5],
+                'timestamp': r[6],
+                'date': r[7],
+                'dwell_seconds': r[8] or 0,
+                'dwell_str': r[9] or '< 1m',
+                'face_crop_b64': r[10] or '',
+                'status': r[11] or 'active',
+                'acknowledged_at': r[12],
+                'acknowledged_by': r[13]
+            })
+        conn.close()
+        return {'success': True, 'count': len(rows), 'intrusions': rows}
+
+    def acknowledge_zone_intrusions(self, ids, ack_by='Admin'):
+        if not ids:
+            return {'success': False, 'error': 'No IDs provided'}
+        now_iso = get_ist_iso()
+        conn = sqlite3.connect(DB_PATH, timeout=20.0)
+        cur = conn.cursor()
+        placeholders = ','.join(['?'] * len(ids))
+        cur.execute(f"UPDATE zone_intrusions SET status = 'acknowledged', acknowledged_at = ?, acknowledged_by = ? WHERE id IN ({placeholders})", (now_iso, ack_by, *ids))
+        conn.commit()
+        conn.close()
+        return {'success': True, 'updated': len(ids)}
+
+    def delete_zone_intrusions(self, ids):
+        if not ids:
+            return {'success': False, 'error': 'No IDs provided'}
+        conn = sqlite3.connect(DB_PATH, timeout=20.0)
+        cur = conn.cursor()
+        placeholders = ','.join(['?'] * len(ids))
+        cur.execute(f"DELETE FROM zone_intrusions WHERE id IN ({placeholders})", tuple(ids))
+        conn.commit()
+        conn.close()
+        return {'success': True, 'deleted': len(ids)}
 
 
 # ── HTTP Server Request Handler ─────────────────────────────────────────────
@@ -5870,6 +6055,14 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
             params = urllib.parse.parse_qs(parsed.query)
             limit = int(params.get('limit', [100])[0]) if params.get('limit') else 100
             return self.send_json(200, tracker.get_alerts(limit=limit))
+
+        if path in ('/api/zone-intrusions', '/api/employees/zone-intrusions'):
+            params = urllib.parse.parse_qs(parsed.query)
+            limit = int(params.get('limit', [100])[0]) if params.get('limit') else 100
+            date_str = params.get('date', [None])[0]
+            org_id = params.get('org_id', [tracker.get_active_org()])[0]
+            status_filter = params.get('status', [None])[0]
+            return self.send_json(200, tracker.get_zone_intrusions(org_id=org_id, date_str=date_str, limit=limit, status_filter=status_filter))
 
         if path == '/api/orgs':
             orgs = tracker.get_orgs()
@@ -6085,6 +6278,7 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
             name = body.get('name')
             dept = body.get('department')
             desig = body.get('designation')
+            restr_cams = body.get('restricted_cameras')
             if not emp_id or emp_id not in tracker.unique_cache_by_id:
                 return self.send_json(404, {'error': f'Employee {emp_id} not found'})
             prof = tracker.unique_cache_by_id[emp_id]
@@ -6095,8 +6289,49 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
                 prof['department'] = dept
             if desig:
                 prof['designation'] = desig
-            tracker.async_db_execute("UPDATE unique_visitors SET name = ?, department = ?, designation = ?, is_enrolled = 1 WHERE id = ?", (prof.get('name'), prof.get('department'), prof.get('designation'), emp_id))
+            if restr_cams is not None:
+                if isinstance(restr_cams, str):
+                    try:
+                        restr_list = json.loads(restr_cams)
+                    except Exception:
+                        restr_list = [c.strip() for c in restr_cams.split(',') if c.strip()]
+                else:
+                    restr_list = list(restr_cams)
+                prof['restricted_cameras'] = restr_list
+
+            restr_json = json.dumps(prof.get('restricted_cameras') or [])
+            cur_restr = prof.get('restricted_cameras') or []
+
+            # 0ms Instant Sync: Update active tracks across all camera pipelines immediately
+            for pipe in tracker.pipelines.values():
+                try:
+                    with pipe.lock:
+                        is_pipe_restr = bool(
+                            pipe.camera_id in cur_restr or 
+                            getattr(pipe, 'name', '') in cur_restr or 
+                            any(c.lower() in (pipe.camera_id.lower(), getattr(pipe, 'name', '').lower()) for c in cur_restr if isinstance(c, str))
+                        )
+                        for tid, trk in list(pipe.active_tracks.items()):
+                            if trk.get('visitor_id') == emp_id:
+                                trk['is_zone_intrusion'] = is_pipe_restr
+                except Exception:
+                    pass
+
+            tracker.async_db_execute("UPDATE unique_visitors SET name = ?, department = ?, designation = ?, restricted_cameras = ?, is_enrolled = 1 WHERE id = ?", (prof.get('name'), prof.get('department'), prof.get('designation'), restr_json, emp_id))
             return self.send_json(200, {'success': True, 'employee': prof, 'employees': tracker.get_recent_visitors(limit=100)})
+
+        if path in ('/api/zone-intrusions/acknowledge', '/api/employees/zone-intrusions/acknowledge'):
+            int_id = body.get('id')
+            int_ids = body.get('ids') or ([int_id] if int_id else [])
+            ack_by = body.get('acknowledged_by', 'Admin')
+            res = tracker.acknowledge_zone_intrusions(int_ids, ack_by=ack_by)
+            return self.send_json(200, res)
+
+        if path in ('/api/zone-intrusions/delete', '/api/employees/zone-intrusions/delete'):
+            int_id = body.get('id')
+            int_ids = body.get('ids') or ([int_id] if int_id else [])
+            res = tracker.delete_zone_intrusions(int_ids)
+            return self.send_json(200, res)
 
         if path in ('/api/attendance/manual-action', '/api/employees/manual-attendance'):
             emp_id = body.get('employee_id') or body.get('id') or body.get('visitor_id')

@@ -25,6 +25,7 @@ const fmtTime = (ts) => {
 
 export default function EmployeeRegistry({
   visitors = [],
+  cameras = [],
   onDataRefresh,
   onSelectEmployee,
   autoEnrollEnabled = true,
@@ -77,6 +78,190 @@ export default function EmployeeRegistry({
   useEffect(() => {
     ledgerDataRef.current = ledgerData;
   }, [ledgerData]);
+
+  // Available cameras (with fallback if empty)
+  const availableCameras = useMemo(() => {
+    if (cameras && cameras.length > 0) return cameras;
+    return [
+      { id: 'cam_2363ea', name: 'Office entry', role: 'entry', location: 'Main gate' },
+      { id: 'cam_ffca39', name: 'Office exit door', role: 'exit', location: 'Exit door' },
+      { id: 'cam_5ab380', name: 'Cabin 1 Camera', role: 'internal', location: 'Cabin 1' },
+      { id: 'cam_571115', name: 'Cash Table', role: 'internal', location: 'Cash Table' }
+    ];
+  }, [cameras]);
+
+  // -------------------------------------------------------------
+  // ZONE INTRUSIONS STATE & ACTIONS
+  // -------------------------------------------------------------
+  const [zoneIntrusions, setZoneIntrusions] = useState([]);
+  const [zoneLoading, setZoneLoading] = useState(false);
+  const [zoneSearch, setZoneSearch] = useState('');
+  const [zoneStatusFilter, setZoneStatusFilter] = useState('all'); // 'all', 'active', 'acknowledged'
+  const [zoneCameraFilter, setZoneCameraFilter] = useState('all');
+  const [zoneDateFilter, setZoneDateFilter] = useState('');
+  const [editingEmployeeModal, setEditingEmployeeModal] = useState(null);
+  const [editEmployeeForm, setEditEmployeeForm] = useState({ name: '', department: '', designation: '', restricted_cameras: [] });
+  const [savingEmployeeEdit, setSavingEmployeeEdit] = useState(false);
+
+  const fetchZoneIntrusions = useCallback(async () => {
+    try {
+      const orgParam = activeOrgId ? `&org_id=${encodeURIComponent(activeOrgId)}` : '';
+      const dateParam = zoneDateFilter ? `&date=${encodeURIComponent(zoneDateFilter)}` : '';
+      const statusParam = zoneStatusFilter && zoneStatusFilter !== 'all' ? `&status=${encodeURIComponent(zoneStatusFilter)}` : '';
+      const res = await fetch(`/api/zone-intrusions?limit=200${orgParam}${dateParam}${statusParam}&_t=${Date.now()}`);
+      if (res.ok) {
+        const data = await res.json();
+        setZoneIntrusions(data.intrusions || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch zone intrusions:', err);
+    }
+  }, [activeOrgId, zoneDateFilter, zoneStatusFilter]);
+
+  useEffect(() => {
+    fetchZoneIntrusions();
+    const interval = setInterval(fetchZoneIntrusions, 5000);
+    return () => clearInterval(interval);
+  }, [fetchZoneIntrusions]);
+
+  const handleAcknowledgeIntrusion = async (id) => {
+    try {
+      const res = await fetch('/api/zone-intrusions/acknowledge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, acknowledged_by: 'Security Officer' })
+      });
+      if (res.ok) {
+        showNotice('✓ Intrusion alert acknowledged');
+        fetchZoneIntrusions();
+      }
+    } catch (err) {
+      showNotice('Failed to acknowledge alert', false);
+    }
+  };
+
+  const handleAcknowledgeAllIntrusions = async () => {
+    const activeIds = zoneIntrusions.filter(z => z.status === 'active').map(z => z.id);
+    if (!activeIds.length) return;
+    try {
+      const res = await fetch('/api/zone-intrusions/acknowledge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: activeIds, acknowledged_by: 'Security Officer' })
+      });
+      if (res.ok) {
+        showNotice(`✓ Acknowledged ${activeIds.length} intrusion alerts`);
+        fetchZoneIntrusions();
+      }
+    } catch (err) {
+      showNotice('Failed to acknowledge alerts', false);
+    }
+  };
+
+  const handleDeleteIntrusion = async (id) => {
+    if (!window.confirm('Delete this zone intrusion record?')) return;
+    try {
+      const res = await fetch('/api/zone-intrusions/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      if (res.ok) {
+        showNotice('✓ Intrusion record deleted');
+        fetchZoneIntrusions();
+      }
+    } catch (err) {
+      showNotice('Failed to delete record', false);
+    }
+  };
+
+  const openEditModal = (v, e) => {
+    if (e) e.stopPropagation();
+    let restr = v.restricted_cameras || [];
+    if (typeof restr === 'string') {
+      try { restr = JSON.parse(restr); } catch { restr = []; }
+    }
+    setEditingEmployeeModal(v);
+    setEditEmployeeForm({
+      name: v.name || v.display_name || '',
+      department: v.department || 'General Staff',
+      designation: v.designation || 'Staff Member',
+      restricted_cameras: Array.isArray(restr) ? [...restr] : []
+    });
+  };
+
+  const handleSaveEmployeeModal = async (e) => {
+    if (e) e.preventDefault();
+    if (!editingEmployeeModal) return;
+    setSavingEmployeeEdit(true);
+    try {
+      const res = await fetch('/api/employees/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: editingEmployeeModal.id,
+          name: editEmployeeForm.name || undefined,
+          department: editEmployeeForm.department,
+          designation: editEmployeeForm.designation,
+          restricted_cameras: editEmployeeForm.restricted_cameras
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Update failed');
+      showNotice(`✓ Updated zone permissions for ${editEmployeeForm.name || editingEmployeeModal.id}`);
+      setEditingEmployeeModal(null);
+      if (onDataRefresh) onDataRefresh();
+    } catch (err) {
+      showNotice(err.message || 'Error updating employee', false);
+    } finally {
+      setSavingEmployeeEdit(false);
+    }
+  };
+
+  const toggleRestrictedCamera = (camId) => {
+    setEditEmployeeForm(prev => {
+      const current = prev.restricted_cameras || [];
+      const exists = current.includes(camId);
+      const next = exists ? current.filter(c => c !== camId) : [...current, camId];
+      return { ...prev, restricted_cameras: next };
+    });
+  };
+
+  const filteredZoneIntrusions = useMemo(() => {
+    return zoneIntrusions.filter(z => {
+      if (zoneStatusFilter && zoneStatusFilter !== 'all' && z.status !== zoneStatusFilter) return false;
+      if (zoneCameraFilter && zoneCameraFilter !== 'all' && z.camera_id !== zoneCameraFilter && z.camera_name !== zoneCameraFilter) return false;
+      if (zoneDateFilter && z.date !== zoneDateFilter) return false;
+      if (zoneSearch.trim()) {
+        const q = zoneSearch.toLowerCase();
+        const matchEmp = (z.employee_name || '').toLowerCase().includes(q) || (z.employee_id || '').toLowerCase().includes(q);
+        const matchDept = (z.department || '').toLowerCase().includes(q);
+        const matchCam = (z.camera_name || '').toLowerCase().includes(q) || (z.camera_id || '').toLowerCase().includes(q);
+        if (!matchEmp && !matchDept && !matchCam) return false;
+      }
+      return true;
+    });
+  }, [zoneIntrusions, zoneStatusFilter, zoneCameraFilter, zoneDateFilter, zoneSearch]);
+
+  const zoneKpis = useMemo(() => {
+    const total = zoneIntrusions.length;
+    const active = zoneIntrusions.filter(z => z.status === 'active').length;
+    const uniqueViolators = new Set(zoneIntrusions.map(z => z.employee_id)).size;
+    const camCounts = {};
+    zoneIntrusions.forEach(z => {
+      const key = z.camera_name || z.camera_id;
+      if (key) camCounts[key] = (camCounts[key] || 0) + 1;
+    });
+    let mostBreached = '—';
+    let maxBreaches = 0;
+    Object.entries(camCounts).forEach(([cam, count]) => {
+      if (count > maxBreaches) {
+        maxBreaches = count;
+        mostBreached = `${cam} (${count})`;
+      }
+    });
+    return { total, active, uniqueViolators, mostBreached };
+  }, [zoneIntrusions]);
 
   // Single Employee Manual Override Modal
   const [singleOverrideOpen, setSingleOverrideOpen] = useState(false);
@@ -934,6 +1119,43 @@ export default function EmployeeRegistry({
               {combinedWatchlist.length}
             </span>
           </button>
+
+          {/* Tab 5: Zone Intrusion */}
+          <button
+            onClick={() => switchSection('zone_intrusion')}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '8px 16px',
+              borderRadius: '8px',
+              border: 'none',
+              fontSize: '12px',
+              fontWeight: '700',
+              cursor: 'pointer',
+              backgroundColor: activeSection === 'zone_intrusion' ? '#991b1b' : 'transparent',
+              color: activeSection === 'zone_intrusion' ? '#ffffff' : '#64748b',
+              boxShadow: activeSection === 'zone_intrusion' ? '0 2px 4px rgba(153, 27, 27, 0.25)' : 'none',
+              transition: 'all 0.15s ease'
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+            </svg>
+            Zone Intrusion
+            <span style={{
+              padding: '1px 8px',
+              borderRadius: '9999px',
+              fontSize: '11px',
+              fontWeight: '800',
+              backgroundColor: activeSection === 'zone_intrusion' ? '#ffffff' : '#fee2e2',
+              color: activeSection === 'zone_intrusion' ? '#991b1b' : '#991b1b',
+              boxShadow: activeSection === 'zone_intrusion' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
+            }}>
+              {zoneIntrusions.length}
+            </span>
+          </button>
         </div>
 
         {/* Right Actions */}
@@ -1629,6 +1851,22 @@ export default function EmployeeRegistry({
                                     🚨 BLACKLISTED
                                   </span>
                                 )}
+                                {v.restricted_cameras && v.restricted_cameras.length > 0 && (
+                                  <span
+                                    title={`Prohibited Checkpoints: ${Array.isArray(v.restricted_cameras) ? v.restricted_cameras.join(', ') : v.restricted_cameras}`}
+                                    style={{
+                                      fontSize: '9px',
+                                      fontWeight: '800',
+                                      padding: '1px 6px',
+                                      borderRadius: '4px',
+                                      backgroundColor: '#fee2e2',
+                                      color: '#991b1b',
+                                      border: '1px solid #fca5a5'
+                                    }}
+                                  >
+                                    🚫 {Array.isArray(v.restricted_cameras) ? v.restricted_cameras.length : 1} Zones Restricted
+                                  </span>
+                                )}
                               </div>
                             </div>
                           </div>
@@ -1794,9 +2032,9 @@ export default function EmployeeRegistry({
                               </button>
                             )}
                             <button
-                              onClick={(e) => startEdit(v, e)}
+                              onClick={(e) => openEditModal(v, e)}
                               style={{ padding: '3px 8px', borderRadius: '5px', backgroundColor: '#f8fafc', border: '1px solid #cbd5e1', fontSize: '11px', cursor: 'pointer', color: '#475569', fontWeight: '600' }}
-                              title="Edit department and role"
+                              title="Edit profile & designate restricted zone cameras"
                             >
                               Edit
                             </button>
@@ -3691,6 +3929,591 @@ export default function EmployeeRegistry({
       )}
 
       {/* ========================================================================= */}
+      {/* VIEW 5: ZONE INTRUSIONS / RESTRICTED AREA BREACHES                        */}
+      {/* ========================================================================= */}
+      {activeSection === 'zone_intrusion' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {/* Header Banner */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '16px 20px',
+            backgroundColor: '#fff',
+            borderRadius: '12px',
+            border: '1px solid #fee2e2',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.04)'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{
+                width: '38px',
+                height: '38px',
+                borderRadius: '10px',
+                backgroundColor: '#fef2f2',
+                border: '1px solid #fecdd3',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#dc2626',
+                fontSize: '20px'
+              }}>
+                🚫
+              </div>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '15px', fontWeight: '800', color: '#991b1b' }}>
+                  Restricted Zone & Area Intrusion Audit
+                </h3>
+                <p style={{ margin: '2px 0 0', fontSize: '12px', color: '#64748b' }}>
+                  Biometric tracking of employees detected on prohibited cameras and restricted checkpoints.
+                </p>
+              </div>
+            </div>
+
+            {/* Live Indicator */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '11px',
+                fontWeight: '700',
+                padding: '4px 10px',
+                borderRadius: '20px',
+                backgroundColor: zoneKpis.active > 0 ? '#fef2f2' : '#f0fdf4',
+                color: zoneKpis.active > 0 ? '#dc2626' : '#16a34a',
+                border: `1px solid ${zoneKpis.active > 0 ? '#fecdd3' : '#bbf7d0'}`
+              }}>
+                <span style={{
+                  width: '7px',
+                  height: '7px',
+                  borderRadius: '50%',
+                  backgroundColor: zoneKpis.active > 0 ? '#dc2626' : '#16a34a'
+                }} />
+                {zoneKpis.active > 0 ? `${zoneKpis.active} ACTIVE INTRUSIONS` : 'ALL ZONES SECURE'}
+              </span>
+            </div>
+          </div>
+
+          {/* Executive KPI Summary */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+            gap: '12px'
+          }}>
+            {/* KPI 1 */}
+            <div style={{
+              backgroundColor: '#fff',
+              padding: '14px 18px',
+              borderRadius: '10px',
+              border: '1px solid #e2e8f0',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
+            }}>
+              <div style={{ fontSize: '11px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Total Breaches Logged
+              </div>
+              <div style={{ fontSize: '24px', fontWeight: '900', color: '#0f172a', marginTop: '4px' }}>
+                {zoneKpis.total}
+              </div>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
+                Cumulative incident events
+              </div>
+            </div>
+
+            {/* KPI 2 */}
+            <div style={{
+              backgroundColor: '#fff',
+              padding: '14px 18px',
+              borderRadius: '10px',
+              border: `1px solid ${zoneKpis.active > 0 ? '#fecdd3' : '#e2e8f0'}`,
+              boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
+            }}>
+              <div style={{ fontSize: '11px', fontWeight: '700', color: zoneKpis.active > 0 ? '#dc2626' : '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Active Alerts
+              </div>
+              <div style={{ fontSize: '24px', fontWeight: '900', color: zoneKpis.active > 0 ? '#dc2626' : '#059669', marginTop: '4px' }}>
+                {zoneKpis.active}
+              </div>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
+                Pending officer review
+              </div>
+            </div>
+
+            {/* KPI 3 */}
+            <div style={{
+              backgroundColor: '#fff',
+              padding: '14px 18px',
+              borderRadius: '10px',
+              border: '1px solid #e2e8f0',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
+            }}>
+              <div style={{ fontSize: '11px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Unique Violators
+              </div>
+              <div style={{ fontSize: '24px', fontWeight: '900', color: '#0f172a', marginTop: '4px' }}>
+                {zoneKpis.uniqueViolators}
+              </div>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
+                Distinct staff members
+              </div>
+            </div>
+
+            {/* KPI 4 */}
+            <div style={{
+              backgroundColor: '#fff',
+              padding: '14px 18px',
+              borderRadius: '10px',
+              border: '1px solid #e2e8f0',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
+            }}>
+              <div style={{ fontSize: '11px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Most Breached Zone
+              </div>
+              <div style={{ fontSize: '16px', fontWeight: '800', color: '#b91c1c', marginTop: '8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {zoneKpis.mostBreached}
+              </div>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
+                Highest frequency checkpoint
+              </div>
+            </div>
+          </div>
+
+          {/* Filter Bar */}
+          <div style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '10px',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '12px 16px',
+            backgroundColor: '#fff',
+            borderRadius: '10px',
+            border: '1px solid #e2e8f0'
+          }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
+              {/* Search */}
+              <input
+                type="text"
+                placeholder="Search staff, ID, zone..."
+                value={zoneSearch}
+                onChange={e => setZoneSearch(e.target.value)}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid #cbd5e1',
+                  fontSize: '12px',
+                  width: '210px',
+                  outline: 'none'
+                }}
+              />
+
+              {/* Status Pills */}
+              <div style={{ display: 'flex', gap: '4px', backgroundColor: '#f1f5f9', padding: '3px', borderRadius: '8px' }}>
+                <button
+                  type="button"
+                  onClick={() => setZoneStatusFilter('all')}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    fontSize: '11px',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    backgroundColor: zoneStatusFilter === 'all' ? '#ffffff' : 'transparent',
+                    color: zoneStatusFilter === 'all' ? '#0f172a' : '#64748b',
+                    boxShadow: zoneStatusFilter === 'all' ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
+                  }}
+                >
+                  All ({zoneIntrusions.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setZoneStatusFilter('active')}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    fontSize: '11px',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    backgroundColor: zoneStatusFilter === 'active' ? '#dc2626' : 'transparent',
+                    color: zoneStatusFilter === 'active' ? '#ffffff' : '#64748b',
+                    boxShadow: zoneStatusFilter === 'active' ? '0 1px 2px rgba(220, 38, 38, 0.2)' : 'none'
+                  }}
+                >
+                  🔴 Active ({zoneKpis.active})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setZoneStatusFilter('acknowledged')}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    fontSize: '11px',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    backgroundColor: zoneStatusFilter === 'acknowledged' ? '#059669' : 'transparent',
+                    color: zoneStatusFilter === 'acknowledged' ? '#ffffff' : '#64748b',
+                    boxShadow: zoneStatusFilter === 'acknowledged' ? '0 1px 2px rgba(5, 150, 105, 0.2)' : 'none'
+                  }}
+                >
+                  ✓ Acknowledged ({zoneIntrusions.length - zoneKpis.active})
+                </button>
+              </div>
+
+              {/* Zone Filter */}
+              <select
+                value={zoneCameraFilter}
+                onChange={e => setZoneCameraFilter(e.target.value)}
+                style={{
+                  padding: '6px 10px',
+                  borderRadius: '6px',
+                  border: '1px solid #cbd5e1',
+                  fontSize: '12px',
+                  backgroundColor: '#fff',
+                  outline: 'none',
+                  color: '#334155'
+                }}
+              >
+                <option value="all">All Checkpoints / Zones</option>
+                {availableCameras.map(c => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} ({c.location || c.role})
+                  </option>
+                ))}
+              </select>
+
+              {/* Date Filter */}
+              <input
+                type="date"
+                value={zoneDateFilter}
+                onChange={e => setZoneDateFilter(e.target.value)}
+                style={{
+                  padding: '5px 8px',
+                  borderRadius: '6px',
+                  border: '1px solid #cbd5e1',
+                  fontSize: '12px',
+                  backgroundColor: '#fff',
+                  outline: 'none',
+                  color: '#334155'
+                }}
+              />
+              {zoneDateFilter && (
+                <button
+                  type="button"
+                  onClick={() => setZoneDateFilter('')}
+                  style={{
+                    padding: '4px 8px',
+                    borderRadius: '5px',
+                    border: '1px solid #e2e8f0',
+                    backgroundColor: '#f8fafc',
+                    fontSize: '11px',
+                    color: '#64748b',
+                    cursor: 'pointer'
+                  }}
+                >
+                  Clear Date
+                </button>
+              )}
+            </div>
+
+            {/* Action Buttons */}
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              {zoneKpis.active > 0 && (
+                <button
+                  type="button"
+                  onClick={handleAcknowledgeAllIntrusions}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    backgroundColor: '#059669',
+                    color: '#fff',
+                    fontSize: '12px',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    boxShadow: '0 1px 2px rgba(5, 150, 105, 0.2)'
+                  }}
+                >
+                  ✓ Acknowledge All Active ({zoneKpis.active})
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={fetchZoneIntrusions}
+                style={{
+                  padding: '6px 10px',
+                  borderRadius: '6px',
+                  border: '1px solid #cbd5e1',
+                  backgroundColor: '#f8fafc',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  color: '#475569',
+                  cursor: 'pointer'
+                }}
+              >
+                🔄 Refresh
+              </button>
+            </div>
+          </div>
+
+          {/* Audit Table */}
+          <div style={{
+            backgroundColor: '#fff',
+            borderRadius: '12px',
+            border: '1px solid #e2e8f0',
+            overflow: 'hidden',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
+          }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
+              <thead>
+                <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#64748b', fontWeight: '700' }}>
+                  <th style={{ padding: '12px 16px' }}>Incident Time & Date</th>
+                  <th style={{ padding: '12px 16px' }}>Employee Identity</th>
+                  <th style={{ padding: '12px 16px' }}>Breached Zone / Camera</th>
+                  <th style={{ padding: '12px 16px' }}>CCTV Evidence</th>
+                  <th style={{ padding: '12px 16px' }}>Alert Status</th>
+                  <th style={{ padding: '12px 16px' }}>Audit Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredZoneIntrusions.length === 0 ? (
+                  <tr>
+                    <td colSpan="6" style={{ padding: '48px 16px', textAlign: 'center' }}>
+                      <div style={{ fontSize: '32px', marginBottom: '8px' }}>🛡️</div>
+                      <div style={{ fontSize: '15px', fontWeight: '800', color: '#0f172a' }}>
+                        No Zone Intrusion Incidents Found
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#64748b', maxWidth: '440px', margin: '4px auto 0' }}>
+                        {zoneSearch || zoneStatusFilter !== 'all' || zoneCameraFilter !== 'all' || zoneDateFilter
+                          ? 'No intrusion events match your filter criteria. Try adjusting or clearing your filters.'
+                          : 'No staff members have entered prohibited zones. Designate restricted camera checkpoints for employees via the "Edit" action in the Employee Details tab.'}
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  filteredZoneIntrusions.map((z, idx) => {
+                    const isAlert = z.status === 'active';
+                    return (
+                      <tr
+                        key={z.id || idx}
+                        style={{
+                          borderBottom: '1px solid #f1f5f9',
+                          backgroundColor: isAlert ? '#fff5f5' : (idx % 2 === 0 ? '#ffffff' : '#f8fafc')
+                        }}
+                      >
+                        {/* Time & Date */}
+                        <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>
+                          <div style={{ fontWeight: '700', color: '#0f172a' }}>
+                            {fmtTime(z.timestamp)}
+                          </div>
+                          <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
+                            {z.date || (z.timestamp ? z.timestamp.split('T')[0] : 'Today')}
+                          </div>
+                        </td>
+
+                        {/* Employee Identity */}
+                        <td style={{ padding: '12px 16px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <div style={{
+                              width: '34px',
+                              height: '34px',
+                              borderRadius: '6px',
+                              overflow: 'hidden',
+                              backgroundColor: '#e2e8f0',
+                              border: '1px solid #cbd5e1',
+                              flexShrink: 0,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontWeight: '800',
+                              color: '#64748b',
+                              fontSize: '11px'
+                            }}>
+                              {z.face_crop_b64 ? (
+                                <img
+                                  src={z.face_crop_b64.startsWith('data:') ? z.face_crop_b64 : `data:image/jpeg;base64,${z.face_crop_b64}`}
+                                  alt={z.employee_id}
+                                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                />
+                              ) : (
+                                (z.employee_name || z.employee_id || 'EM').slice(0, 2).toUpperCase()
+                              )}
+                            </div>
+                            <div>
+                              <div style={{ fontWeight: '700', color: '#0f172a' }}>
+                                {z.employee_name || z.employee_id}
+                              </div>
+                              <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginTop: '2px' }}>
+                                <span style={{
+                                  fontSize: '10px',
+                                  fontWeight: '800',
+                                  padding: '1px 5px',
+                                  borderRadius: '4px',
+                                  backgroundColor: '#f1f5f9',
+                                  color: '#475569'
+                                }}>
+                                  {z.employee_id}
+                                </span>
+                                <span style={{ fontSize: '11px', color: '#64748b' }}>
+                                  {z.department || 'General Staff'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Breached Zone / Camera */}
+                        <td style={{ padding: '12px 16px' }}>
+                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '3px 8px', borderRadius: '6px', backgroundColor: '#fee2e2', border: '1px solid #fecdd3' }}>
+                            <span style={{ fontSize: '13px' }}>🚫</span>
+                            <span style={{ fontWeight: '800', color: '#991b1b' }}>
+                              {z.camera_name || z.camera_id}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '3px' }}>
+                            ID: {z.camera_id}
+                          </div>
+                        </td>
+
+                        {/* CCTV Evidence */}
+                        <td style={{ padding: '12px 16px' }}>
+                          {z.face_crop_b64 ? (
+                            <div style={{
+                              width: '44px',
+                              height: '44px',
+                              borderRadius: '6px',
+                              overflow: 'hidden',
+                              border: isAlert ? '2px solid #ef4444' : '1px solid #cbd5e1',
+                              boxShadow: isAlert ? '0 0 6px rgba(239, 68, 68, 0.4)' : 'none'
+                            }}>
+                              <img
+                                src={z.face_crop_b64.startsWith('data:') ? z.face_crop_b64 : `data:image/jpeg;base64,${z.face_crop_b64}`}
+                                alt="Breach Evidence"
+                                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                              />
+                            </div>
+                          ) : (
+                            <span style={{ fontSize: '11px', color: '#94a3b8' }}>Live Detected</span>
+                          )}
+                        </td>
+
+                        {/* Status */}
+                        <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>
+                          {isAlert ? (
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                              padding: '3px 8px',
+                              borderRadius: '9999px',
+                              fontSize: '11px',
+                              fontWeight: '800',
+                              backgroundColor: '#fee2e2',
+                              color: '#dc2626',
+                              border: '1px solid #f87171'
+                            }}>
+                              <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#dc2626' }} />
+                              ACTIVE ALERT
+                            </span>
+                          ) : (
+                            <div>
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                padding: '2px 8px',
+                                borderRadius: '9999px',
+                                fontSize: '11px',
+                                fontWeight: '700',
+                                backgroundColor: '#ecfdf5',
+                                color: '#059669',
+                                border: '1px solid #a7f3d0'
+                              }}>
+                                ✓ ACKNOWLEDGED
+                              </span>
+                              {z.acknowledged_by && (
+                                <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px' }}>
+                                  by {z.acknowledged_by}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </td>
+
+                        {/* Actions */}
+                        <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>
+                          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                            {isAlert && (
+                              <button
+                                type="button"
+                                onClick={() => handleAcknowledgeIntrusion(z.id)}
+                                style={{
+                                  padding: '4px 10px',
+                                  borderRadius: '5px',
+                                  border: 'none',
+                                  backgroundColor: '#059669',
+                                  color: '#fff',
+                                  fontSize: '11px',
+                                  fontWeight: '700',
+                                  cursor: 'pointer'
+                                }}
+                                title="Acknowledge & review this incident"
+                              >
+                                ✓ Acknowledge
+                              </button>
+                            )}
+                            {z.employee_id && onSelectEmployee && (
+                              <button
+                                type="button"
+                                onClick={() => onSelectEmployee(z.employee_id)}
+                                style={{
+                                  padding: '4px 8px',
+                                  borderRadius: '5px',
+                                  border: '1px solid #bae6fd',
+                                  backgroundColor: '#f0f9ff',
+                                  color: '#0284c7',
+                                  fontSize: '11px',
+                                  fontWeight: '700',
+                                  cursor: 'pointer'
+                                }}
+                                title="View employee journey history"
+                              >
+                                Journey ➔
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteIntrusion(z.id)}
+                              style={{
+                                padding: '4px 7px',
+                                borderRadius: '5px',
+                                border: '1px solid #fecdd3',
+                                backgroundColor: '#fff1f2',
+                                color: '#e11d48',
+                                fontSize: '11px',
+                                cursor: 'pointer'
+                              }}
+                              title="Delete record"
+                            >
+                              🗑
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
       {/* MODAL 1: SINGLE EMPLOYEE MANUAL ATTENDANCE OVERRIDE                       */}
       {/* ========================================================================= */}
       {singleOverrideOpen && overrideEmp && (
@@ -4426,6 +5249,311 @@ export default function EmployeeRegistry({
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 3: EDIT EMPLOYEE PROFILE & RESTRICTED ZONE PERMISSIONS               */}
+      {/* ========================================================================= */}
+      {editingEmployeeModal && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(15, 23, 42, 0.65)',
+          backdropFilter: 'blur(3px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: '16px'
+        }}>
+          <div style={{
+            backgroundColor: '#ffffff',
+            borderRadius: '16px',
+            width: '100%',
+            maxWidth: '560px',
+            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+            border: '1px solid #e2e8f0',
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column'
+          }}>
+            {/* Modal Header */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '16px 20px',
+              backgroundColor: '#f8fafc',
+              borderBottom: '1px solid #e2e8f0'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{
+                  width: '36px',
+                  height: '36px',
+                  borderRadius: '8px',
+                  backgroundColor: '#fee2e2',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '18px',
+                  color: '#991b1b'
+                }}>
+                  🚫
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '800', color: '#0f172a' }}>
+                    Edit Profile & Zone Permissions
+                  </h3>
+                  <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
+                    Configure duty details & prohibited checkpoints for {editingEmployeeModal.id}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingEmployeeModal(null)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  fontSize: '20px',
+                  color: '#94a3b8',
+                  cursor: 'pointer',
+                  padding: '4px'
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <form onSubmit={handleSaveEmployeeModal} style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              {/* Employee ID & Photo Summary */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                padding: '10px 14px',
+                borderRadius: '8px',
+                backgroundColor: '#f1f5f9',
+                border: '1px solid #e2e8f0'
+              }}>
+                <div style={{
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '6px',
+                  overflow: 'hidden',
+                  backgroundColor: '#cbd5e1',
+                  flexShrink: 0
+                }}>
+                  {editingEmployeeModal.photo_b64 || (editingEmployeeModal.crops && editingEmployeeModal.crops[0]) ? (
+                    <img
+                      src={(editingEmployeeModal.photo_b64 || editingEmployeeModal.crops[0]).startsWith('data:')
+                        ? (editingEmployeeModal.photo_b64 || editingEmployeeModal.crops[0])
+                        : `data:image/jpeg;base64,${editingEmployeeModal.photo_b64 || editingEmployeeModal.crops[0]}`}
+                      alt={editingEmployeeModal.id}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    />
+                  ) : (
+                    <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', color: '#64748b' }}>
+                      {(editingEmployeeModal.name || editingEmployeeModal.id).slice(0, 2).toUpperCase()}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <div style={{ fontSize: '13px', fontWeight: '800', color: '#0f172a' }}>
+                    {editingEmployeeModal.name || editingEmployeeModal.display_name || editingEmployeeModal.id}
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
+                    ID: <span style={{ fontWeight: '700', color: '#0284c7' }}>{editingEmployeeModal.id}</span> • {editingEmployeeModal.is_enrolled ? 'Enrolled Staff' : 'Auto ID'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Name Field */}
+              <div>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '4px' }}>
+                  Staff Full Name
+                </label>
+                <input
+                  type="text"
+                  value={editEmployeeForm.name}
+                  onChange={e => setEditEmployeeForm(p => ({ ...p, name: e.target.value }))}
+                  placeholder="e.g. Viswa Kumar"
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    borderRadius: '8px',
+                    border: '1px solid #cbd5e1',
+                    fontSize: '13px',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+
+              {/* Department & Designation Row */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '4px' }}>
+                    Department
+                  </label>
+                  <select
+                    value={editEmployeeForm.department}
+                    onChange={e => setEditEmployeeForm(p => ({ ...p, department: e.target.value }))}
+                    style={{
+                      width: '100%',
+                      padding: '8px 10px',
+                      borderRadius: '8px',
+                      border: '1px solid #cbd5e1',
+                      fontSize: '13px',
+                      backgroundColor: '#fff',
+                      outline: 'none',
+                      boxSizing: 'border-box'
+                    }}
+                  >
+                    {DEPARTMENTS.map(d => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '4px' }}>
+                    Role / Designation
+                  </label>
+                  <input
+                    type="text"
+                    value={editEmployeeForm.designation}
+                    onChange={e => setEditEmployeeForm(p => ({ ...p, designation: e.target.value }))}
+                    placeholder="e.g. OT Technician"
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid #cbd5e1',
+                      fontSize: '13px',
+                      outline: 'none',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* RESTRICTED CAMERAS CHECKPOINTS SECTION */}
+              <div style={{
+                marginTop: '6px',
+                padding: '14px',
+                borderRadius: '10px',
+                backgroundColor: '#fff',
+                border: '1.5px solid #fecdd3'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <span style={{ fontSize: '16px' }}>🚫</span>
+                  <div style={{ fontSize: '13px', fontWeight: '800', color: '#991b1b' }}>
+                    Restricted Access Camera Checkpoints
+                  </div>
+                </div>
+                <p style={{ margin: '0 0 12px 0', fontSize: '11px', color: '#64748b' }}>
+                  Select the checkpoints where this employee is prohibited from entering. If spotted on these cameras, their CCTV bounding box will be marked in red and an intrusion event will be logged.
+                </p>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  {availableCameras.map(cam => {
+                    const isRestricted = (editEmployeeForm.restricted_cameras || []).includes(cam.id) || (editEmployeeForm.restricted_cameras || []).includes(cam.name);
+                    return (
+                      <div
+                        key={cam.id}
+                        onClick={() => toggleRestrictedCamera(cam.id)}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '10px',
+                          borderRadius: '8px',
+                          border: `1.5px solid ${isRestricted ? '#ef4444' : '#e2e8f0'}`,
+                          backgroundColor: isRestricted ? '#fef2f2' : '#f8fafc',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease'
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isRestricted}
+                          onChange={() => {}}
+                          style={{ cursor: 'pointer', width: '16px', height: '16px', accentColor: '#dc2626' }}
+                        />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: '12px', fontWeight: '800', color: isRestricted ? '#991b1b' : '#1e293b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {cam.name}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '2px' }}>
+                            <span style={{
+                              fontSize: '9px',
+                              fontWeight: '700',
+                              padding: '1px 5px',
+                              borderRadius: '4px',
+                              backgroundColor: isRestricted ? '#fee2e2' : '#e2e8f0',
+                              color: isRestricted ? '#b91c1c' : '#64748b'
+                            }}>
+                              {isRestricted ? '🚫 PROHIBITED' : '✓ Permitted'}
+                            </span>
+                            <span style={{ fontSize: '10px', color: '#94a3b8' }}>
+                              {cam.location || cam.role}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Modal Buttons */}
+              <div style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: '10px',
+                marginTop: '10px',
+                paddingTop: '14px',
+                borderTop: '1px solid #e2e8f0'
+              }}>
+                <button
+                  type="button"
+                  onClick={() => setEditingEmployeeModal(null)}
+                  disabled={savingEmployeeEdit}
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: '8px',
+                    border: '1px solid #cbd5e1',
+                    backgroundColor: '#fff',
+                    color: '#475569',
+                    fontSize: '13px',
+                    fontWeight: '700',
+                    cursor: 'pointer'
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingEmployeeEdit}
+                  style={{
+                    padding: '8px 20px',
+                    borderRadius: '8px',
+                    border: 'none',
+                    backgroundColor: '#0284c7',
+                    color: '#fff',
+                    fontSize: '13px',
+                    fontWeight: '800',
+                    cursor: savingEmployeeEdit ? 'not-allowed' : 'pointer',
+                    boxShadow: '0 2px 4px rgba(2, 132, 199, 0.25)'
+                  }}
+                >
+                  {savingEmployeeEdit ? 'Saving Changes...' : 'Save Permissions'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

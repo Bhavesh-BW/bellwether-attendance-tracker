@@ -44,7 +44,7 @@ export default function App() {
   const [watchlist, setWatchlist] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [activeAlert, setActiveAlert] = useState(null);
-  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [soundEnabled, setSoundEnabled] = useState(false);
   const [autoEnrollEnabled, setAutoEnrollEnabled] = useState(true);
   const [registrySection, setRegistrySection] = useState('details');
   const [loading, setLoading] = useState(true);
@@ -1041,6 +1041,7 @@ export default function App() {
       {/* Employee Registry — compact management table */}
       <EmployeeRegistry
         visitors={visitors}
+        cameras={cameras}
         onDataRefresh={fetchData}
         onSelectEmployee={(id) => setSelectedJourneyId(id)}
         autoEnrollEnabled={autoEnrollEnabled}
