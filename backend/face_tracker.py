@@ -3252,6 +3252,21 @@ class FaceTrackerEngine:
         except Exception as e:
             return False, str(e)
 
+    def update_org(self, org_id: str, new_name: str):
+        """Update an organization's display name."""
+        clean_name = (new_name or '').strip()
+        if not clean_name:
+            return False, "Organization name cannot be empty"
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=10.0)
+            cur = conn.cursor()
+            cur.execute("UPDATE orgs SET name = ? WHERE id = ?", (clean_name, org_id))
+            conn.commit()
+            conn.close()
+            return True, {'id': org_id, 'name': clean_name}
+        except Exception as e:
+            return False, str(e)
+
     def delete_org(self, org_id: str):
         """Delete an organization (must not be 'default' or 'medanta')."""
         if org_id in ('default', 'medanta'):
@@ -5327,6 +5342,16 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
             if ok:
                 return self.send_json(200, {'success': True, 'org': res, 'orgs': tracker.get_orgs()})
             return self.send_json(400, {'error': res})
+
+        if path in ('/api/orgs/update', '/api/orgs/rename'):
+            org_id = body.get('id') or body.get('org_id')
+            new_name = (body.get('name') or '').strip()
+            if not org_id or not new_name:
+                return self.send_json(400, {'error': 'Missing org id or name'})
+            ok, res = tracker.update_org(org_id, new_name)
+            if ok:
+                return self.send_json(200, {'success': True, 'org': res, 'orgs': tracker.get_orgs()})
+            return self.send_json(400, {'error': str(res)})
 
         if path == '/api/orgs/delete':
             org_id = body.get('id') or body.get('org_id')

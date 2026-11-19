@@ -55,6 +55,9 @@ export default function App() {
   const [newOrgName, setNewOrgName] = useState('');
   const [newOrgIndustry, setNewOrgIndustry] = useState('Corporate');
   const [isCreatingOrg, setIsCreatingOrg] = useState(false);
+  const [isEditingOrgName, setIsEditingOrgName] = useState(false);
+  const [editOrgName, setEditOrgName] = useState('');
+  const [isSavingOrgName, setIsSavingOrgName] = useState(false);
 
   // Fetch KPI & status data
   const fetchData = useCallback(async () => {
@@ -558,6 +561,37 @@ export default function App() {
     }
   };
 
+  const handleStartEditOrg = () => {
+    const cur = orgs.find(o => o.id === activeOrgId);
+    setEditOrgName(cur?.name || '');
+    setIsEditingOrgName(true);
+  };
+
+  const handleSaveOrgRename = async () => {
+    const trimmed = editOrgName.trim();
+    if (!trimmed) {
+      setIsEditingOrgName(false);
+      return;
+    }
+    setIsSavingOrgName(true);
+    try {
+      const res = await fetch('/api/orgs/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: activeOrgId, name: trimmed })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update organization name');
+      if (data.orgs) setOrgs(data.orgs);
+      setIsEditingOrgName(false);
+      await fetchData();
+    } catch (e) {
+      alert(e.message || 'Error updating org name');
+    } finally {
+      setIsSavingOrgName(false);
+    }
+  };
+
   const handleCreateOrgSubmit = async (e) => {
     if (e) e.preventDefault();
     const name = newOrgName.trim();
@@ -663,47 +697,140 @@ export default function App() {
             }}>
               <span style={{ fontSize: '14px' }}>🏢</span>
               <span style={{ fontSize: '12px', fontWeight: '700', color: '#92400e' }}>Org:</span>
-              <select
-                value={activeOrgId}
-                onChange={(e) => handleOrgChange(e.target.value)}
-                style={{
-                  border: 'none',
-                  backgroundColor: 'transparent',
-                  fontSize: '12px',
-                  fontWeight: '800',
-                  color: '#c2410c',
-                  cursor: 'pointer',
-                  outline: 'none',
-                  padding: '2px 0',
-                  maxWidth: '160px'
-                }}
-              >
-                {orgs.map(org => (
-                  <option key={org.id} value={org.id}>{org.name}</option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => setShowAddOrgModal(true)}
-                title="Create New Organization for Demo"
-                style={{
-                  background: '#ea580c',
-                  border: 'none',
-                  color: '#ffffff',
-                  borderRadius: '5px',
-                  padding: '2px 8px',
-                  fontSize: '11px',
-                  fontWeight: '800',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '3px',
-                  marginLeft: '2px',
-                  boxShadow: '0 1px 2px rgba(234, 88, 12, 0.25)'
-                }}
-              >
-                <span>+</span> New
-              </button>
+              {isEditingOrgName ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <input
+                    type="text"
+                    value={editOrgName}
+                    onChange={(e) => setEditOrgName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleSaveOrgRename();
+                      if (e.key === 'Escape') setIsEditingOrgName(false);
+                    }}
+                    autoFocus
+                    placeholder="Enter org name"
+                    style={{
+                      border: '1px solid #ea580c',
+                      backgroundColor: '#ffffff',
+                      fontSize: '12px',
+                      fontWeight: '800',
+                      color: '#c2410c',
+                      borderRadius: '5px',
+                      padding: '2px 6px',
+                      outline: 'none',
+                      width: '160px'
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSaveOrgRename}
+                    disabled={isSavingOrgName}
+                    title="Save Organization Name (Enter)"
+                    style={{
+                      background: '#16a34a',
+                      border: 'none',
+                      color: '#ffffff',
+                      borderRadius: '5px',
+                      padding: '2px 7px',
+                      fontSize: '11px',
+                      fontWeight: '800',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    ✓
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingOrgName(false)}
+                    title="Cancel (Esc)"
+                    style={{
+                      background: '#e2e8f0',
+                      border: 'none',
+                      color: '#475569',
+                      borderRadius: '5px',
+                      padding: '2px 7px',
+                      fontSize: '11px',
+                      fontWeight: '800',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <select
+                    value={activeOrgId}
+                    onChange={(e) => {
+                      if (e.target.value === '__rename_active__') {
+                        handleStartEditOrg();
+                      } else {
+                        handleOrgChange(e.target.value);
+                      }
+                    }}
+                    style={{
+                      border: 'none',
+                      backgroundColor: 'transparent',
+                      fontSize: '12px',
+                      fontWeight: '800',
+                      color: '#c2410c',
+                      cursor: 'pointer',
+                      outline: 'none',
+                      padding: '2px 0',
+                      maxWidth: '160px'
+                    }}
+                  >
+                    {orgs.map(org => (
+                      <option key={org.id} value={org.id}>{org.name}</option>
+                    ))}
+                    <option value="__rename_active__">✏️ Rename current org...</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleStartEditOrg}
+                    title="Edit / Rename Current Organization Name"
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: '2px 3px',
+                      borderRadius: '4px',
+                      fontSize: '12px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#ea580c',
+                      opacity: 0.85
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+                    onMouseLeave={(e) => e.currentTarget.style.opacity = '0.85'}
+                  >
+                    ✏️
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddOrgModal(true)}
+                    title="Create New Organization for Demo"
+                    style={{
+                      background: '#ea580c',
+                      border: 'none',
+                      color: '#ffffff',
+                      borderRadius: '5px',
+                      padding: '2px 8px',
+                      fontSize: '11px',
+                      fontWeight: '800',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '3px',
+                      marginLeft: '2px',
+                      boxShadow: '0 1px 2px rgba(234, 88, 12, 0.25)'
+                    }}
+                  >
+                    <span>+</span> New
+                  </button>
+                </>
+              )}
             </div>
           )}
 
