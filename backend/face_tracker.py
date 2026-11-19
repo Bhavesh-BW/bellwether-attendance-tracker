@@ -3261,6 +3261,10 @@ class FaceTrackerEngine:
             conn = sqlite3.connect(DB_PATH, timeout=10.0)
             cur = conn.cursor()
             cur.execute("UPDATE orgs SET name = ? WHERE id = ?", (clean_name, org_id))
+            if cur.rowcount == 0:
+                now_str = datetime.datetime.now().isoformat()
+                cur.execute("INSERT OR REPLACE INTO orgs (id, name, industry, created_at) VALUES (?, ?, ?, ?)",
+                            (org_id, clean_name, 'General', now_str))
             conn.commit()
             conn.close()
             return True, {'id': org_id, 'name': clean_name}
