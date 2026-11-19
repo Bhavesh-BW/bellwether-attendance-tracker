@@ -2952,6 +2952,262 @@ class FaceTrackerEngine:
 
         return max(0, calc_mins)
 
+    def compute_employee_shift_metrics(self, employee_id: str, date_str: str = None) -> dict:
+        if not employee_id:
+            return {
+                'status': 'Absent', 'check_in_time': None, 'check_out_time': None,
+                'check_in_display': '—', 'check_out_display': '—',
+                'check_in_camera': None, 'check_in_camera_name': None,
+                'check_out_camera': None, 'check_out_camera_name': None,
+                'working_minutes': 0, 'working_str': '0h 00m',
+                'break_minutes': 0, 'break_str': '0h 00m',
+                'shift_span_minutes': 0, 'shift_span_str': '0h 00m',
+                'productivity_pct': 0.0, 'in_count': 0, 'out_count': 0, 'break_count': 0,
+                'is_checkout_verified': False, 'is_check_in_manual': False, 'is_check_out_manual': False,
+                'breaks': [], 'extended_breaks': [], 'extended_breaks_count': 0
+            }
+        if not date_str:
+            date_str = get_ist_date_str()
+
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT check_in_time, check_out_time, status, is_checkout_verified, duration_minutes,
+                   check_in_camera, check_in_camera_name, check_out_camera, check_out_camera_name
+            FROM daily_attendance WHERE employee_id = ? AND date = ?
+        """, (employee_id, date_str))
+        att_row = cur.fetchone()
+
+        cur.execute("""
+            SELECT camera_id, timestamp, photo_b64 FROM visitor_sightings
+            WHERE visitor_id = ? AND timestamp LIKE ?
+            ORDER BY timestamp ASC
+        """, (employee_id, f"{date_str}%"))
+        sightings = cur.fetchall()
+
+        cur.execute("SELECT id, role, name FROM cameras")
+        cam_info_db = {r[0]: {'role': r[1], 'name': r[2]} for r in cur.fetchall()}
+        conn.close()
+
+        if not att_row and not sightings:
+            return {
+                'status': 'Absent', 'check_in_time': None, 'check_out_time': None,
+                'check_in_display': '—', 'check_out_display': '—',
+                'check_in_camera': None, 'check_in_camera_name': None,
+                'check_out_camera': None, 'check_out_camera_name': None,
+                'working_minutes': 0, 'working_str': '0h 00m',
+                'break_minutes': 0, 'break_str': '0h 00m',
+                'shift_span_minutes': 0, 'shift_span_str': '0h 00m',
+                'productivity_pct': 0.0, 'in_count': 0, 'out_count': 0, 'break_count': 0,
+                'is_checkout_verified': False, 'is_check_in_manual': False, 'is_check_out_manual': False,
+                'breaks': [], 'extended_breaks': [], 'extended_breaks_count': 0
+            }
+
+        in_t = att_row[0] if (att_row and att_row[0]) else (sightings[0][1] if sightings else None)
+        out_t = att_row[1] if (att_row and att_row[1]) else None
+        db_status = att_row[2] if att_row else 'in_hospital'
+        is_chk = bool(att_row[3]) if att_row else False
+
+        status_str = 'Checked Out' if is_chk or str(db_status).lower() in ('checked out', 'checked_out') else 'On Duty'
+
+        cur_in_dt = None
+        cur_exit_dt = None
+        cur_exit_cam = None
+        cur_exit_cam_name = None
+        active_work_seconds = 0
+        total_break_seconds = 0
+        in_count = 0
+        out_count = 0
+        breaks_list = []
+        detailed_breaks = []
+
+        entry_cams = set(cid for cid, c in CAMERA_SOURCES.items() if c.get('role') == 'entry')
+        entry_cams.update(['staff', 'main', 'manual_entry'])
+        exit_cams = set(cid for cid, c in CAMERA_SOURCES.items() if c.get('role') == 'exit')
+        exit_cams.update(['staff_exit', 'cam_cd9e9a', 'manual_exit'])
+
+        for cam_id, ts_str, p_b64 in sightings:
+            cid_lower = str(cam_id or '').lower()
+            c_meta = cam_info_db.get(cam_id) or CAMERA_SOURCES.get(cam_id, {})
+            crole = str(c_meta.get('role', '')).lower()
+            cname = c_meta.get('name') or ('Manual Override' if 'manual' in cid_lower else ('Office Exit' if 'exit' in cid_lower else ('Office Entry' if 'entry' in cid_lower else cam_id)))
+            is_entry = (crole == 'entry') or (cam_id in entry_cams) or ('entry' in cid_lower) or (cam_id == 'manual_entry')
+            is_exit = (crole == 'exit') or (cam_id in exit_cams) or ('exit' in cid_lower) or (cam_id == 'manual_exit')
+
+            try:
+                dt = datetime.fromisoformat(ts_str).replace(tzinfo=None)
+            except Exception:
+                continue
+
+            if is_entry:
+                in_count += 1
+                if cur_exit_dt is not None:
+                    gap_sec = max(0, (dt - cur_exit_dt).total_seconds())
+                    if gap_sec >= 30:
+                        total_break_seconds += gap_sec
+                        gap_min = int(gap_sec / 60)
+                        breaks_list.append(gap_min)
+                        bh, bm = divmod(gap_min, 60)
+                        dur_str = f"{bh}h {bm:02d}m" if bh > 0 else f"{gap_min}m"
+                        is_ext = (gap_min >= 60)
+                        overstay = max(0, gap_min - 60)
+                        detailed_breaks.append({
+                            'break_id': f"{employee_id}-{cur_exit_dt.strftime('%H%M%S')}",
+                            'exit_time': cur_exit_dt.isoformat(),
+                            'exit_display': cur_exit_dt.strftime("%I:%M %p"),
+                            'exit_camera': cur_exit_cam,
+                            'exit_camera_name': cur_exit_cam_name or 'Exit Gate',
+                            'entry_time': dt.isoformat(),
+                            'entry_display': dt.strftime("%I:%M %p"),
+                            'entry_camera': cam_id,
+                            'entry_camera_name': cname,
+                            'duration_minutes': gap_min,
+                            'duration_str': dur_str,
+                            'is_extended': is_ext,
+                            'overstay_minutes': overstay,
+                            'overstay_str': f"+{overstay}m" if overstay > 0 else "0m",
+                            'status': 'Returned'
+                        })
+                    cur_exit_dt = None
+                if cur_in_dt is None:
+                    cur_in_dt = dt
+
+            elif is_exit:
+                out_count += 1
+                if cur_in_dt is not None:
+                    work_sec = max(0, (dt - cur_in_dt).total_seconds())
+                    active_work_seconds += work_sec
+                    cur_in_dt = None
+                cur_exit_dt = dt
+                cur_exit_cam = cam_id
+                cur_exit_cam_name = cname
+
+        # If currently still On Duty
+        now_dt = get_ist_now().replace(tzinfo=None)
+        latest_sighting_dt = None
+        if sightings:
+            try:
+                latest_sighting_dt = datetime.fromisoformat(sightings[-1][1]).replace(tzinfo=None)
+            except Exception:
+                pass
+
+        if status_str == 'On Duty':
+            if cur_exit_dt is not None:
+                # Stepped out during active shift and currently away
+                away_sec = max(0, (now_dt - cur_exit_dt).total_seconds())
+                away_min = int(away_sec / 60)
+                bh, bm = divmod(away_min, 60)
+                dur_str = f"{bh}h {bm:02d}m" if bh > 0 else f"{away_min}m"
+                is_ext = (away_min >= 60)
+                overstay = max(0, away_min - 60)
+                detailed_breaks.append({
+                    'break_id': f"{employee_id}-{cur_exit_dt.strftime('%H%M%S')}-away",
+                    'exit_time': cur_exit_dt.isoformat(),
+                    'exit_display': cur_exit_dt.strftime("%I:%M %p"),
+                    'exit_camera': cur_exit_cam,
+                    'exit_camera_name': cur_exit_cam_name or 'Exit Gate',
+                    'entry_time': None,
+                    'entry_display': 'Still Outside',
+                    'entry_camera': None,
+                    'entry_camera_name': None,
+                    'duration_minutes': away_min,
+                    'duration_str': dur_str,
+                    'is_extended': is_ext,
+                    'overstay_minutes': overstay,
+                    'overstay_str': f"+{overstay}m" if overstay > 0 else "0m",
+                    'status': 'Currently Away'
+                })
+            elif in_t:
+                try:
+                    is_today = (date_str == get_ist_date_str())
+                    meas_dt = now_dt if is_today else (latest_sighting_dt or now_dt)
+                    if cur_in_dt is not None and meas_dt > cur_in_dt:
+                        work_sec = max(0, (meas_dt - cur_in_dt).total_seconds())
+                        active_work_seconds += work_sec
+                except Exception:
+                    pass
+
+        # Total shift span
+        try:
+            first_dt = datetime.fromisoformat(in_t).replace(tzinfo=None) if in_t else (latest_sighting_dt or now_dt)
+            if is_chk and out_t:
+                final_dt = datetime.fromisoformat(out_t).replace(tzinfo=None)
+            elif date_str == get_ist_date_str():
+                final_dt = now_dt
+            else:
+                final_dt = latest_sighting_dt or first_dt
+            total_span_sec = max(60, (final_dt - first_dt).total_seconds())
+        except Exception:
+            total_span_sec = max(60, active_work_seconds + total_break_seconds)
+
+        span_min = int(total_span_sec / 60)
+        work_min = int(active_work_seconds / 60)
+        break_min = int(total_break_seconds / 60)
+
+        # Sanity adjustments
+        if work_min + break_min < span_min and break_min == 0 and work_min > 0:
+            work_min = span_min
+        elif work_min == 0 and span_min > 0:
+            work_min = max(0, span_min - break_min)
+
+        break_min = max(0, span_min - work_min)
+        prod_pct = round((work_min / float(max(1, span_min)) * 100.0), 1) if span_min > 0 else 100.0
+        prod_pct = min(100.0, max(0.0, prod_pct))
+
+        wh, wm = divmod(work_min, 60)
+        bh, bm = divmod(break_min, 60)
+        sh, sm = divmod(span_min, 60)
+
+        in_disp = '—'
+        if in_t:
+            try:
+                in_disp = datetime.fromisoformat(in_t).strftime("%I:%M %p")
+            except Exception:
+                in_disp = in_t.split('T')[1][:5] if 'T' in in_t else in_t
+
+        out_disp = '—'
+        if out_t and is_chk:
+            try:
+                out_disp = datetime.fromisoformat(out_t).strftime("%I:%M %p")
+            except Exception:
+                out_disp = out_t.split('T')[1][:5] if 'T' in out_t else out_t
+
+        in_cam_id = att_row[5] if att_row else None
+        in_cam_name = att_row[6] if att_row else None
+        out_cam_id = att_row[7] if att_row else None
+        out_cam_name = att_row[8] if att_row else None
+
+        is_in_manual = (in_cam_id == 'manual_entry') or ('manual' in str(in_cam_name or '').lower())
+        is_out_manual = (out_cam_id == 'manual_exit') or ('manual' in str(out_cam_name or '').lower())
+
+        return {
+            'status': status_str,
+            'check_in_time': in_t,
+            'check_in_display': in_disp,
+            'check_in_camera': in_cam_id or 'entry',
+            'check_in_camera_name': in_cam_name or ('Manual Override (Admin)' if is_in_manual else 'Staff Inbound Entry'),
+            'check_out_time': out_t if is_chk else None,
+            'check_out_display': out_disp if is_chk else 'Shift Ongoing',
+            'check_out_camera': out_cam_id or ('manual_exit' if is_out_manual else 'exit'),
+            'check_out_camera_name': (out_cam_name or ('Manual Override (Admin)' if is_out_manual else 'Staff Check-Out Exit')) if is_chk else 'Shift Ongoing',
+            'working_minutes': work_min,
+            'working_str': f"{wh}h {wm:02d}m",
+            'break_minutes': break_min,
+            'break_str': f"{bh}h {bm:02d}m",
+            'shift_span_minutes': span_min,
+            'shift_span_str': f"{sh}h {sm:02d}m",
+            'productivity_pct': prod_pct,
+            'in_count': max(1 if in_t else 0, in_count),
+            'out_count': out_count,
+            'break_count': len(breaks_list),
+            'is_checkout_verified': is_chk,
+            'is_check_in_manual': is_in_manual,
+            'is_check_out_manual': is_out_manual,
+            'breaks': detailed_breaks,
+            'extended_breaks': [b for b in detailed_breaks if b.get('is_extended')],
+            'extended_breaks_count': len([b for b in detailed_breaks if b.get('is_extended')])
+        }
+
     def get_employee_30d_stats(self, employee_id: str):
         conn = sqlite3.connect(DB_PATH, timeout=20.0)
         cur = conn.cursor()
@@ -2967,8 +3223,8 @@ class FaceTrackerEngine:
         rows = cur.fetchall()
 
         # Query in/out sighting counts per day from visitor_sightings
-        entry_cams = [cid for cid, c in CAMERA_SOURCES.items() if c.get('role') == 'entry'] + ['staff', 'main']
-        exit_cams = [cid for cid, c in CAMERA_SOURCES.items() if c.get('role') == 'exit'] + ['staff_exit', 'cam_cd9e9a']
+        entry_cams = [cid for cid, c in CAMERA_SOURCES.items() if c.get('role') == 'entry'] + ['staff', 'main', 'manual_entry']
+        exit_cams = [cid for cid, c in CAMERA_SOURCES.items() if c.get('role') == 'exit'] + ['staff_exit', 'cam_cd9e9a', 'manual_exit']
         entry_sql = "'" + "','".join(set(entry_cams)) + "'"
         exit_sql = "'" + "','".join(set(exit_cams)) + "'"
         cur.execute(f"""
@@ -3031,22 +3287,34 @@ class FaceTrackerEngine:
             day_out_cnt = s_data.get('out_count', 1 if is_chk else 0)
             day_total_mov = s_data.get('total', day_in_cnt + day_out_cnt)
 
+            m = self.compute_employee_shift_metrics(employee_id, d_str)
+
             daily_records.append({
                 'date': d_str,
                 'formatted_date': f_date,
                 'check_in_time': in_t,
                 'check_in_display': in_disp,
                 'check_in_camera': r[3] or r[2] or 'Main Porch Entry',
+                'is_check_in_manual': bool((r[3] or '').startswith('manual') or (r[2] or '').startswith('manual')),
                 'check_out_time': out_t,
                 'check_out_display': out_disp,
                 'check_out_camera': r[6] or r[5] or ('Main porch exit' if is_chk else 'Ongoing'),
+                'is_check_out_manual': bool((r[6] or '').startswith('manual') or (r[5] or '').startswith('manual')),
                 'is_checkout_verified': is_chk,
                 'duration_minutes': dur_m,
                 'duration_str': dur_str,
+                'working_minutes': m['working_minutes'],
+                'working_str': m['working_str'],
+                'break_minutes': m['break_minutes'],
+                'break_str': m['break_str'],
+                'shift_span_minutes': m['shift_span_minutes'],
+                'shift_span_str': m['shift_span_str'],
+                'productivity_pct': m['productivity_pct'],
+                'break_count': m['break_count'],
                 'status': 'Checked Out' if (is_chk or st == 'checked_out') else 'In Hospital',
                 'cameras_visited': (r[10] or '').split(','),
-                'in_count': day_in_cnt,
-                'out_count': day_out_cnt,
+                'in_count': max(day_in_cnt, m['in_count']),
+                'out_count': max(day_out_cnt, m['out_count']),
                 'total_movements': day_total_mov
             })
 
@@ -3069,12 +3337,349 @@ class FaceTrackerEngine:
             'attendance_pct': attendance_pct,
             'today_status': today_status,
             'today_duration': today_duration,
+            'today_working_str': today_rec.get('working_str', '0h 00m') if today_rec else '0h 00m',
+            'today_break_str': today_rec.get('break_str', '0h 00m') if today_rec else '0h 00m',
+            'today_productivity_pct': today_rec.get('productivity_pct', 0.0) if today_rec else 0.0,
             'today_checkout_verified': today_checkout_verified,
             'today_in_count': today_in_count,
             'today_out_count': today_out_count,
             'today_total_movements': today_total_mov,
             'today_record': today_rec,
             'daily_records': daily_records
+        }
+
+    def manual_attendance_action(self, employee_id: str, action: str, timestamp_iso: str = None, date_str: str = None, reason: str = 'Admin Manual Override'):
+        if not employee_id:
+            return {'success': False, 'error': 'Missing employee_id'}
+        action = str(action or '').lower().strip()
+        if action not in ('check_in', 'check_out'):
+            return {'success': False, 'error': f"Invalid action '{action}'. Must be 'check_in' or 'check_out'"}
+
+        # Normalize timestamp_iso
+        if not timestamp_iso:
+            timestamp_iso = get_ist_iso()
+        elif 'T' not in timestamp_iso:
+            if not date_str:
+                date_str = get_ist_date_str()
+            t_str = timestamp_iso.strip()
+            if len(t_str) == 5:
+                t_str = f"{t_str}:00"
+            timestamp_iso = f"{date_str}T{t_str}"
+
+        try:
+            parsed_dt = datetime.fromisoformat(timestamp_iso)
+            date_part = parsed_dt.strftime('%Y-%m-%d')
+        except Exception:
+            date_part = date_str or get_ist_date_str()
+            timestamp_iso = f"{date_part}T{timestamp_iso.split('T')[-1] if 'T' in timestamp_iso else '17:00:00'}"
+
+        v_mem = self.unique_cache_by_id.get(employee_id, {})
+        emp_org = v_mem.get('org_id') or self.get_active_org()
+
+        conn = sqlite3.connect(DB_PATH, timeout=15.0)
+        cur = conn.cursor()
+
+        cam_id = 'manual_entry' if action == 'check_in' else 'manual_exit'
+        cam_name = 'Manual Override (Admin)'
+
+        # 1. Insert sighting in visitor_sightings
+        cur.execute("""
+            INSERT INTO visitor_sightings (
+                visitor_id, camera_id, timestamp, confidence, photo_b64, face_b64, dwell_mins, last_seen
+            ) VALUES (?, ?, ?, 1.0, 'MANUAL_OVERRIDE', NULL, 1, ?)
+        """, (employee_id, cam_id, timestamp_iso, timestamp_iso))
+
+        # 2. Update daily_attendance
+        cur.execute("SELECT id, check_in_time, check_out_time, cameras_visited, duration_minutes FROM daily_attendance WHERE employee_id = ? AND date = ?", (employee_id, date_part))
+        att_row = cur.fetchone()
+
+        if action == 'check_in':
+            if not att_row:
+                cur.execute("""
+                    INSERT INTO daily_attendance (
+                        employee_id, date, check_in_time, check_in_camera, check_in_camera_name,
+                        check_out_time, check_out_camera, check_out_camera_name,
+                        duration_minutes, status, is_checkout_verified, sightings_count, cameras_visited, org_id
+                    ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 0, 'in_hospital', 0, 1, ?, ?)
+                """, (employee_id, date_part, timestamp_iso, cam_id, cam_name, cam_id, emp_org))
+            else:
+                rec_id, ex_in, ex_out, cams_v, prev_dur = att_row
+                cams_set = set((cams_v or '').split(','))
+                cams_set.add(cam_id)
+                new_cams = ','.join(c for c in cams_set if c)
+                update_in = timestamp_iso if (not ex_in or timestamp_iso < ex_in) else ex_in
+                cur.execute("""
+                    UPDATE daily_attendance SET
+                        check_in_time = ?,
+                        check_in_camera = CASE WHEN check_in_time IS NULL OR check_in_time = ? THEN ? ELSE check_in_camera END,
+                        check_in_camera_name = CASE WHEN check_in_time IS NULL OR check_in_time = ? THEN ? ELSE check_in_camera_name END,
+                        status = 'in_hospital',
+                        is_checkout_verified = 0,
+                        sightings_count = sightings_count + 1,
+                        cameras_visited = ?
+                    WHERE id = ?
+                """, (update_in, update_in, cam_id, update_in, cam_name, new_cams, rec_id))
+
+            if v_mem:
+                v_mem['today_status'] = 'in_hospital'
+                v_mem['is_checkout_verified'] = False
+                v_mem['last_seen'] = timestamp_iso
+                v_mem['last_camera'] = cam_id
+                v_mem['last_camera_name'] = cam_name
+
+        elif action == 'check_out':
+            if not att_row:
+                cur.execute("""
+                    INSERT INTO daily_attendance (
+                        employee_id, date, check_in_time, check_in_camera, check_in_camera_name,
+                        check_out_time, check_out_camera, check_out_camera_name,
+                        duration_minutes, status, is_checkout_verified, sightings_count, cameras_visited, org_id
+                    ) VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?, 0, 'checked_out', 1, 1, ?, ?)
+                """, (employee_id, date_part, timestamp_iso, cam_id, cam_name, cam_id, emp_org))
+            else:
+                rec_id, ex_in, ex_out, cams_v, prev_dur = att_row
+                cams_set = set((cams_v or '').split(','))
+                cams_set.add(cam_id)
+                new_cams = ','.join(c for c in cams_set if c)
+                cur.execute("""
+                    UPDATE daily_attendance SET
+                        check_out_time = ?,
+                        check_out_camera = ?,
+                        check_out_camera_name = ?,
+                        status = 'checked_out',
+                        is_checkout_verified = 1,
+                        sightings_count = sightings_count + 1,
+                        cameras_visited = ?
+                    WHERE id = ?
+                """, (timestamp_iso, cam_id, cam_name, new_cams, rec_id))
+
+            if v_mem:
+                v_mem['today_status'] = 'checked_out'
+                v_mem['is_checkout_verified'] = True
+                v_mem['last_seen'] = timestamp_iso
+                v_mem['last_camera'] = cam_id
+                v_mem['last_camera_name'] = cam_name
+
+        conn.commit()
+        conn.close()
+
+        metrics = self.compute_employee_shift_metrics(employee_id, date_part)
+        try:
+            conn_u = sqlite3.connect(DB_PATH, timeout=10.0)
+            conn_u.execute("UPDATE daily_attendance SET duration_minutes = ? WHERE employee_id = ? AND date = ?", (metrics['working_minutes'], employee_id, date_part))
+            conn_u.commit()
+            conn_u.close()
+        except Exception:
+            pass
+
+        return {
+            'success': True,
+            'action': action,
+            'employee_id': employee_id,
+            'date': date_part,
+            'timestamp': timestamp_iso,
+            'metrics': metrics
+        }
+
+    def bulk_checkout(self, employee_ids: list = None, timestamp_iso: str = None, date_str: str = None, org_id: str = None, reason: str = 'Shift End Bulk Check-Out'):
+        if not org_id:
+            org_id = self.get_active_org()
+        if not date_str:
+            date_str = get_ist_date_str()
+        if not timestamp_iso:
+            timestamp_iso = f"{date_str}T17:00:00"
+        elif 'T' not in timestamp_iso:
+            t_str = timestamp_iso.strip()
+            if len(t_str) == 5:
+                t_str = f"{t_str}:00"
+            timestamp_iso = f"{date_str}T{t_str}"
+
+        target_ids = list(employee_ids) if (employee_ids and isinstance(employee_ids, list)) else []
+        
+        if not target_ids:
+            conn = sqlite3.connect(DB_PATH, timeout=15.0)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT u.id
+                FROM unique_visitors u
+                LEFT JOIN daily_attendance da ON da.employee_id = u.id AND da.date = ?
+                WHERE u.is_enrolled = 1
+                  AND (u.org_id = ? OR (? = 'bellwether' AND u.org_id IN ('bellwether', 'default')))
+                  AND (da.status = 'in_hospital' OR (da.check_in_time IS NOT NULL AND (da.is_checkout_verified = 0 OR da.is_checkout_verified IS NULL)))
+            """, (date_str, org_id, org_id))
+            target_ids = [r[0] for r in cur.fetchall()]
+            conn.close()
+
+        updated = []
+        for emp_id in target_ids:
+            res = self.manual_attendance_action(emp_id, 'check_out', timestamp_iso, date_str, reason)
+            if res.get('success'):
+                updated.append(emp_id)
+
+        return {
+            'success': True,
+            'count': len(updated),
+            'updated_employees': updated,
+            'timestamp': timestamp_iso,
+            'date': date_str,
+            'org_id': org_id
+        }
+
+    def get_attendance_ledger(self, org_id: str = None, date_str: str = None) -> dict:
+        if not org_id:
+            org_id = self.get_active_org()
+        if not date_str:
+            date_str = get_ist_date_str()
+
+        conn = sqlite3.connect(DB_PATH, timeout=15.0)
+        cur = conn.cursor()
+
+        if org_id in ('bellwether', 'default'):
+            org_clause = "u.org_id IN ('bellwether', 'default')"
+        elif org_id == 'medanta':
+            org_clause = "(u.org_id = 'medanta' OR u.org_id IS NULL OR u.org_id = '')"
+        else:
+            org_clause = f"u.org_id = '{org_id}'"
+
+        cur.execute(f"""
+            SELECT u.id, u.name, u.department, u.designation, u.photo_b64, u.crops_json,
+                   da.check_in_time, da.check_in_camera, da.check_in_camera_name,
+                   da.check_out_time, da.check_out_camera, da.check_out_camera_name,
+                   da.duration_minutes, da.status, da.is_checkout_verified
+            FROM unique_visitors u
+            LEFT JOIN daily_attendance da ON da.employee_id = u.id AND da.date = ?
+            WHERE u.is_enrolled = 1 AND {org_clause}
+            ORDER BY u.name ASC
+        """, (date_str,))
+        rows = cur.fetchall()
+        conn.close()
+
+        records = []
+        extended_absences_all = []
+        total_work_mins = 0
+        total_break_mins = 0
+        total_prod = 0.0
+        present_count = 0
+        on_duty_count = 0
+        checked_out_count = 0
+        absent_count = 0
+
+        for r in rows:
+            emp_id, name, dept, desig, photo_b64, crops_json, in_t, in_c, in_cn, out_t, out_c, out_cn, dur_m, st, is_chk = r
+            crops = []
+            if crops_json:
+                try:
+                    crops = json.loads(crops_json)
+                except Exception:
+                    pass
+            avatar = photo_b64 or (crops[0] if crops else None)
+
+            m = self.compute_employee_shift_metrics(emp_id, date_str)
+            status = m['status']
+            if status == 'Absent':
+                absent_count += 1
+            elif status == 'Checked Out':
+                checked_out_count += 1
+                present_count += 1
+                total_work_mins += m['working_minutes']
+                total_break_mins += m['break_minutes']
+                total_prod += m['productivity_pct']
+            else:
+                on_duty_count += 1
+                present_count += 1
+                total_work_mins += m['working_minutes']
+                total_break_mins += m['break_minutes']
+                total_prod += m['productivity_pct']
+
+            for b in m.get('extended_breaks', []):
+                extended_absences_all.append({
+                    'break_id': b.get('break_id'),
+                    'employee_id': emp_id,
+                    'name': name or emp_id,
+                    'department': dept or 'General Staff',
+                    'designation': desig or 'Staff Member',
+                    'photo_b64': avatar,
+                    'exit_time': b.get('exit_time'),
+                    'exit_display': b.get('exit_display'),
+                    'exit_camera': b.get('exit_camera'),
+                    'exit_camera_name': b.get('exit_camera_name'),
+                    'entry_time': b.get('entry_time'),
+                    'entry_display': b.get('entry_display'),
+                    'entry_camera': b.get('entry_camera'),
+                    'entry_camera_name': b.get('entry_camera_name'),
+                    'duration_minutes': b.get('duration_minutes', 0),
+                    'duration_str': b.get('duration_str', '0m'),
+                    'overstay_minutes': b.get('overstay_minutes', 0),
+                    'overstay_str': b.get('overstay_str', '0m'),
+                    'status': b.get('status', 'Returned')
+                })
+
+            records.append({
+                'employee_id': emp_id,
+                'emp_code': emp_id,
+                'name': name or emp_id,
+                'department': dept or 'General Staff',
+                'designation': desig or 'Staff Member',
+                'photo_b64': avatar,
+                'crops': crops,
+                'status': status,
+                'is_checkout_verified': m['is_checkout_verified'],
+                'check_in_time': m['check_in_time'],
+                'check_in_display': m['check_in_display'],
+                'check_in_camera': m['check_in_camera'],
+                'check_in_camera_name': m['check_in_camera_name'],
+                'is_check_in_manual': m['is_check_in_manual'],
+                'check_out_time': m['check_out_time'],
+                'check_out_display': m['check_out_display'],
+                'check_out_camera': m['check_out_camera'],
+                'check_out_camera_name': m['check_out_camera_name'],
+                'is_check_out_manual': m['is_check_out_manual'],
+                'working_minutes': m['working_minutes'],
+                'working_str': m['working_str'],
+                'break_minutes': m['break_minutes'],
+                'break_str': m['break_str'],
+                'shift_span_minutes': m['shift_span_minutes'],
+                'shift_span_str': m['shift_span_str'],
+                'productivity_pct': m['productivity_pct'],
+                'in_count': m['in_count'],
+                'out_count': m['out_count'],
+                'break_count': m['break_count'],
+                'breaks': m.get('breaks', []),
+                'extended_breaks': m.get('extended_breaks', []),
+                'extended_breaks_count': m.get('extended_breaks_count', 0)
+            })
+
+        extended_absences_all.sort(key=lambda x: (x['status'] != 'Currently Away', -x['duration_minutes']))
+
+        n_pres = max(1, present_count)
+        avg_w = int(total_work_mins / n_pres) if present_count > 0 else 0
+        avg_b = int(total_break_mins / n_pres) if present_count > 0 else 0
+        avg_p = round(total_prod / n_pres, 1) if present_count > 0 else 0.0
+
+        wh, wm = divmod(avg_w, 60)
+        bh, bm = divmod(avg_b, 60)
+
+        summary = {
+            'total_enrolled': len(rows),
+            'present_count': present_count,
+            'on_duty_count': on_duty_count,
+            'checked_out_count': checked_out_count,
+            'absent_count': absent_count,
+            'attendance_rate': round((present_count / max(1, len(rows))) * 100, 1),
+            'avg_working_minutes': avg_w,
+            'avg_working_str': f"{wh}h {wm:02d}m",
+            'avg_break_minutes': avg_b,
+            'avg_break_str': f"{bh}h {bm:02d}m",
+            'avg_productivity_pct': avg_p,
+            'extended_absences_count': len(extended_absences_all)
+        }
+
+        return {
+            'date': date_str,
+            'org_id': org_id,
+            'summary': summary,
+            'employees': records,
+            'extended_absences': extended_absences_all
         }
 
     def _seed_staff_and_30d_attendance(self):
@@ -3515,7 +4120,12 @@ class FaceTrackerEngine:
             cam_name_str = cam_info.get('name', r[0])
             cam_name_lower = str(cam_name_str).lower()
             cam_role = str(cam_info.get('role', '')).lower()
-            if cam_role == 'entry':
+
+            is_manual_s = (r[0] in ('manual_entry', 'manual_exit')) or (r[4] == 'MANUAL_OVERRIDE')
+            if is_manual_s:
+                cam_name_str = 'Manual Override (Admin)'
+                ev_type = 'IN' if r[0] == 'manual_entry' else 'OUT'
+            elif cam_role == 'entry':
                 ev_type = 'IN'
             elif cam_role == 'exit':
                 ev_type = 'OUT'
@@ -3543,7 +4153,7 @@ class FaceTrackerEngine:
             checkpoints.append({
                 'camera_id': r[0],
                 'camera_name': cam_name_str,
-                'location': cam_info.get('location', 'Hospital Zone'),
+                'location': 'Admin Portal' if is_manual_s else cam_info.get('location', 'Hospital Zone'),
                 'timestamp': ts_str,
                 'end_timestamp': s_end_iso,
                 'time_display': t_disp,
@@ -3552,11 +4162,12 @@ class FaceTrackerEngine:
                 'transit_mins': transit_gap_mins,           # Dedicated transit gap field
                 'is_first_of_day': is_first_of_day,
                 'confidence': round(float(r[3] or 0.95) * 100, 1),
-                'face_b64': sighting_face,
-                'photo_b64': sighting_face or sighting_body or vis_row[8],  # Direct face crop for thumbnail
-                'body_b64': sighting_body,                    # Outfit/Torso crop (real CCTV only)
+                'face_b64': None if is_manual_s else sighting_face,
+                'photo_b64': 'MANUAL_OVERRIDE' if is_manual_s else (sighting_face or sighting_body or vis_row[8]),
+                'body_b64': None if is_manual_s else sighting_body,
                 'is_blacklisted': bool(r[5]),
-                'event_type': ev_type
+                'event_type': ev_type,
+                'is_manual': is_manual_s
             })
 
         # If last_seen is more than 30s after the last sighting, include the latest passage checkpoint
@@ -4961,10 +5572,12 @@ class FaceTrackerEngine:
                     today_check_out_cam = v_mem.get('today_check_out_camera')
 
             now_ist = get_ist_now()
+            is_shift_ended = bool(today_status == 'CHECKED OUT' or is_checkout_verified)
             is_exit_last = bool(cam_id and ('exit' in str(cam_id).lower() or 'exit' in str(cam_name).lower()))
-            is_absent = bool(today_check_in and (today_status == 'CHECKED OUT' or is_checkout_verified or is_exit_last))
+            # Problem 1: Exclude shift-ended / checked-out personnel from absent monitoring. Only track absent during active duty hours.
+            is_absent = bool(today_check_in and not is_shift_ended and is_exit_last)
             
-            exit_iso = today_check_out_raw or (last_seen if (is_exit_last and has_been_seen) else None)
+            exit_iso = (last_seen if (is_exit_last and has_been_seen) else None) if is_absent else None
             missing_mins = 0
             missing_str = "—"
             if is_absent and exit_iso:
@@ -5043,7 +5656,8 @@ class FaceTrackerEngine:
                 'today_check_out': today_out_disp,
                 'today_check_out_camera': today_check_out_cam,
                 'is_checkout_verified': is_checkout_verified,
-                'is_absent_from_premises': bool(is_absent and today_check_in),
+                'is_shift_ended': is_shift_ended,
+                'is_absent_from_premises': bool(is_absent),
                 'missing_mins': missing_mins,
                 'missing_duration_str': missing_str,
                 'exit_time_iso': exit_iso,
@@ -5051,6 +5665,13 @@ class FaceTrackerEngine:
                 'today_check_out_raw': today_check_out_raw,
                 'today_duration_mins': today_duration_mins,
                 'today_duration_str': today_dur_str,
+                'working_minutes': stats_30d.get('today_record', {}).get('working_minutes', today_duration_mins) if stats_30d else today_duration_mins,
+                'working_str': stats_30d.get('today_working_str', today_dur_str) if stats_30d else today_dur_str,
+                'break_minutes': stats_30d.get('today_record', {}).get('break_minutes', 0) if stats_30d else 0,
+                'break_str': stats_30d.get('today_break_str', '0h 00m') if stats_30d else '0h 00m',
+                'shift_span_minutes': stats_30d.get('today_record', {}).get('shift_span_minutes', 0) if stats_30d else 0,
+                'shift_span_str': stats_30d.get('today_record', {}).get('shift_span_str', '0h 00m') if stats_30d else '0h 00m',
+                'productivity_pct': stats_30d.get('today_productivity_pct', 0.0) if stats_30d else 0.0,
                 'days_present_30d': stats_30d.get('days_present') if stats_30d else 0,
                 'avg_time_spent_30d': stats_30d.get('avg_daily_time_str') if stats_30d else '0h 00m',
                 'attendance_pct_30d': stats_30d.get('attendance_pct') if stats_30d else 0.0,
@@ -5187,6 +5808,24 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
             filter_mode = params.get('filter', [None])[0]
             org_id = params.get('org_id', [tracker.get_active_org()])[0]
             return self.send_json(200, tracker.get_recent_visitors(limit=limit, filter_mode=filter_mode, org_id=org_id))
+
+        if path in ('/api/attendance/ledger', '/api/employees/shift-ledger'):
+            params = urllib.parse.parse_qs(parsed.query)
+            date_str = params.get('date', [get_ist_date_str()])[0]
+            org_id = params.get('org_id', [tracker.get_active_org()])[0]
+            return self.send_json(200, tracker.get_attendance_ledger(org_id=org_id, date_str=date_str))
+
+        if path in ('/api/attendance/extended-absences', '/api/employees/extended-absences'):
+            params = urllib.parse.parse_qs(parsed.query)
+            date_str = params.get('date', [get_ist_date_str()])[0]
+            org_id = params.get('org_id', [tracker.get_active_org()])[0]
+            ledger = tracker.get_attendance_ledger(org_id=org_id, date_str=date_str)
+            return self.send_json(200, {
+                'date': date_str,
+                'org_id': org_id,
+                'count': len(ledger.get('extended_absences', [])),
+                'extended_absences': ledger.get('extended_absences', [])
+            })
 
         if path == '/api/employees/attendance-history':
             params = urllib.parse.parse_qs(parsed.query)
@@ -5458,6 +6097,26 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
                 prof['designation'] = desig
             tracker.async_db_execute("UPDATE unique_visitors SET name = ?, department = ?, designation = ?, is_enrolled = 1 WHERE id = ?", (prof.get('name'), prof.get('department'), prof.get('designation'), emp_id))
             return self.send_json(200, {'success': True, 'employee': prof, 'employees': tracker.get_recent_visitors(limit=100)})
+
+        if path in ('/api/attendance/manual-action', '/api/employees/manual-attendance'):
+            emp_id = body.get('employee_id') or body.get('id') or body.get('visitor_id')
+            action = body.get('action') # 'check_in' or 'check_out'
+            timestamp_iso = body.get('timestamp') or body.get('timestamp_iso')
+            date_str = body.get('date') or body.get('date_str')
+            reason = body.get('reason', 'Admin Manual Override')
+            res = tracker.manual_attendance_action(emp_id, action, timestamp_iso=timestamp_iso, date_str=date_str, reason=reason)
+            status_code = 200 if res.get('success') else 400
+            return self.send_json(status_code, res)
+
+        if path in ('/api/attendance/bulk-checkout', '/api/employees/bulk-checkout'):
+            emp_ids = body.get('employee_ids') or body.get('ids')
+            timestamp_iso = body.get('timestamp') or body.get('timestamp_iso')
+            date_str = body.get('date') or body.get('date_str')
+            org_id = body.get('org_id') or tracker.get_active_org()
+            reason = body.get('reason', 'Shift End Bulk Check-Out')
+            res = tracker.bulk_checkout(emp_ids, timestamp_iso=timestamp_iso, date_str=date_str, org_id=org_id, reason=reason)
+            status_code = 200 if res.get('success') else 400
+            return self.send_json(status_code, res)
 
         if path == '/api/control':
             camera_id = body.get('camera') or body.get('stream')

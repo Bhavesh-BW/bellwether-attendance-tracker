@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 
 const DEPARTMENTS = [
   'General Staff', 'Management & Leadership', 'Operations', 'Engineering & Tech',
@@ -50,6 +50,205 @@ export default function EmployeeRegistry({
     setActiveSection(sec);
     if (onSectionChange) onSectionChange(sec);
   };
+
+  // -------------------------------------------------------------
+  // ATTENDANCE & SHIFT LEDGER STATE
+  // -------------------------------------------------------------
+  const [ledgerDate, setLedgerDate] = useState(() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  });
+  const [ledgerData, setLedgerData] = useState(null);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [ledgerSyncing, setLedgerSyncing] = useState(false);
+  const [ledgerSearch, setLedgerSearch] = useState('');
+  const [ledgerDeptFilter, setLedgerDeptFilter] = useState('all');
+  const [ledgerStatusFilter, setLedgerStatusFilter] = useState('all'); // 'all', 'on_duty', 'checked_out', 'absent'
+  const ledgerDataRef = useRef(null);
+
+  // Sub-tab state for Absent from Premises View
+  const [absentSubTab, setAbsentSubTab] = useState('currently_away'); // 'currently_away' | 'extended_log'
+  const [extendedStatusFilter, setExtendedStatusFilter] = useState('all'); // 'all' | 'away' | 'returned'
+  const [extendedSearch, setExtendedSearch] = useState('');
+
+  useEffect(() => {
+    ledgerDataRef.current = ledgerData;
+  }, [ledgerData]);
+
+  // Single Employee Manual Override Modal
+  const [singleOverrideOpen, setSingleOverrideOpen] = useState(false);
+  const [overrideEmp, setOverrideEmp] = useState(null);
+  const [overrideAction, setOverrideAction] = useState('check_out');
+  const [overrideTime, setOverrideTime] = useState(() => {
+    const d = new Date();
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  });
+  const [overrideDate, setOverrideDate] = useState(() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  });
+  const [overrideReason, setOverrideReason] = useState('Admin Manual Override');
+  const [overrideLoading, setOverrideLoading] = useState(false);
+  const [overrideNotice, setOverrideNotice] = useState(null);
+
+  // Bulk Shift Check-Out Modal
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkTime, setBulkTime] = useState('17:00');
+  const [bulkDate, setBulkDate] = useState(() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  });
+  const [bulkReason, setBulkReason] = useState('Shift End Regular Check-Out');
+  const [bulkSelectedIds, setBulkSelectedIds] = useState(() => new Set());
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [bulkNotice, setBulkNotice] = useState(null);
+
+  const fetchLedger = useCallback(async (isSilent = false) => {
+    // Only display full loading state if we have no prior data loaded
+    if (!ledgerDataRef.current && !isSilent) {
+      setLedgerLoading(true);
+    } else {
+      setLedgerSyncing(true);
+    }
+    try {
+      const res = await fetch(`/api/attendance/ledger?date=${encodeURIComponent(ledgerDate)}&org_id=${encodeURIComponent(activeOrgId || '')}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      ledgerDataRef.current = data;
+      setLedgerData(data);
+    } catch (err) {
+      console.error('Failed to load attendance ledger:', err);
+    } finally {
+      setLedgerLoading(false);
+      setLedgerSyncing(false);
+    }
+  }, [ledgerDate, activeOrgId]);
+
+  // Initial load when date or active organization changes
+  useEffect(() => {
+    fetchLedger(Boolean(ledgerDataRef.current));
+  }, [fetchLedger]);
+
+  // Silent background refresh when sightings update, keeping UI completely stable without flicker
+  useEffect(() => {
+    if ((activeSection === 'ledger' || activeSection === 'absent') && ledgerDataRef.current) {
+      fetchLedger(true);
+    }
+  }, [visitors, activeSection, fetchLedger]);
+
+  const openSingleOverride = (emp, defaultAction = 'check_out') => {
+    setOverrideEmp(emp);
+    setOverrideAction(defaultAction);
+    const d = new Date();
+    setOverrideTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+    setOverrideDate(ledgerDate);
+    setOverrideReason('Admin Manual Override');
+    setOverrideNotice(null);
+    setSingleOverrideOpen(true);
+  };
+
+  const handleSingleOverrideSubmit = async () => {
+    if (!overrideEmp) return;
+    setOverrideLoading(true);
+    setOverrideNotice(null);
+    try {
+      const targetId = overrideEmp.employee_id || overrideEmp.id;
+      const timestamp = `${overrideDate}T${overrideTime}:00`;
+      const res = await fetch('/api/attendance/manual-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: targetId,
+          action: overrideAction,
+          timestamp,
+          date: overrideDate,
+          reason: overrideReason
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to apply manual override');
+      }
+      setOverrideNotice({ ok: true, msg: `✓ Override applied for ${overrideEmp.name || targetId}!` });
+      setTimeout(() => {
+        setSingleOverrideOpen(false);
+        setOverrideNotice(null);
+      }, 1000);
+      fetchLedger();
+      if (onDataRefresh) onDataRefresh();
+    } catch (err) {
+      setOverrideNotice({ ok: false, msg: err.message });
+    } finally {
+      setOverrideLoading(false);
+    }
+  };
+
+  const handleBulkCheckoutSubmit = async () => {
+    const ids = Array.from(bulkSelectedIds);
+    if (ids.length === 0) {
+      alert("Please select at least one employee for bulk check-out.");
+      return;
+    }
+    setBulkLoading(true);
+    setBulkNotice(null);
+    try {
+      const timestamp = `${bulkDate}T${bulkTime}:00`;
+      const res = await fetch('/api/attendance/bulk-checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_ids: ids,
+          timestamp,
+          date: bulkDate,
+          org_id: activeOrgId || undefined,
+          reason: bulkReason
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Bulk check-out failed');
+      }
+      setBulkNotice({ ok: true, msg: `✓ Successfully checked out ${data.count} staff members at ${bulkTime}!` });
+      setTimeout(() => {
+        setBulkOpen(false);
+        setBulkNotice(null);
+      }, 1200);
+      fetchLedger();
+      if (onDataRefresh) onDataRefresh();
+    } catch (err) {
+      setBulkNotice({ ok: false, msg: err.message });
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  const filteredLedgerEmployees = useMemo(() => {
+    if (!ledgerData || !ledgerData.employees) return [];
+    return ledgerData.employees.filter(e => {
+      if (ledgerDeptFilter !== 'all' && (e.department || 'General Staff') !== ledgerDeptFilter) return false;
+      if (ledgerStatusFilter === 'on_duty' && e.status !== 'On Duty') return false;
+      if (ledgerStatusFilter === 'checked_out' && e.status !== 'Checked Out') return false;
+      if (ledgerStatusFilter === 'absent' && e.status !== 'Absent') return false;
+      if (ledgerSearch.trim()) {
+        const q = ledgerSearch.toLowerCase();
+        const id = (e.employee_id || e.id || '').toLowerCase();
+        const name = (e.name || '').toLowerCase();
+        const dept = (e.department || '').toLowerCase();
+        const desig = (e.designation || '').toLowerCase();
+        if (!id.includes(q) && !name.includes(q) && !dept.includes(q) && !desig.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [ledgerData, ledgerDeptFilter, ledgerStatusFilter, ledgerSearch]);
 
   const autoEnrolledStaff = useMemo(() => {
     return visitors.filter(v => !v.is_enrolled);
@@ -294,14 +493,24 @@ export default function EmployeeRegistry({
     setFacePhotos([]);
   };
 
-  // Employees absent from premises (Checked in today, then exited and have not returned)
+  // Employees absent from premises during active duty hours (Checked in today, actively on duty, crossed exit gate and have not returned)
   const absentStaff = useMemo(() => {
     return visitors.filter(v => {
-      const isCheckedOut = v.today_status === 'CHECKED OUT' || v.is_checkout_verified || v.is_absent_from_premises;
-      const isExitLast = v.last_camera && (String(v.last_camera).toLowerCase().includes('exit') || String(v.camera_name || '').toLowerCase().includes('exit'));
+      // Problem 1 Fix: Exclude staff whose shift has ended or who have checked out
+      const isShiftEnded = v.today_status === 'CHECKED OUT' || v.is_checkout_verified || v.is_shift_ended;
+      if (isShiftEnded) return false;
+
       const hasCheckedIn = Boolean(v.today_check_in);
+      if (!hasCheckedIn) return false;
+
+      const isExitLast = (v.camera_id && String(v.camera_id).toLowerCase().includes('exit')) ||
+                         (v.last_camera && String(v.last_camera).toLowerCase().includes('exit')) ||
+                         (v.camera_name && String(v.camera_name).toLowerCase().includes('exit')) ||
+                         (v.last_camera_name && String(v.last_camera_name).toLowerCase().includes('exit'));
+      const isMarkedAbsent = Boolean(v.is_absent_from_premises);
       const isNotBack = v.today_status !== 'IN HOSPITAL' && v.today_status !== 'in_hospital';
-      return hasCheckedIn && (isCheckedOut || isExitLast) && isNotBack;
+
+      return (isMarkedAbsent || isExitLast) && isNotBack;
     }).map(v => {
       let missingMins = v.missing_mins || 0;
       const exitIso = v.exit_time_iso || v.today_check_out_raw || v.last_seen;
@@ -352,6 +561,39 @@ export default function EmployeeRegistry({
       return true;
     });
   }, [absentStaff, deptFilter, absentFilter, search]);
+
+  // Problem 2: Extended Absences & Excessive Breaks (> 60 mins) Audit Log from Ledger
+  const extendedAbsences = useMemo(() => {
+    return ledgerData?.extended_absences || [];
+  }, [ledgerData]);
+
+  const filteredExtended = useMemo(() => {
+    return extendedAbsences.filter(item => {
+      if (extendedStatusFilter === 'away' && item.status !== 'Currently Away') return false;
+      if (extendedStatusFilter === 'returned' && item.status !== 'Returned') return false;
+      if (deptFilter !== 'all' && (item.department || 'General Staff') !== deptFilter) return false;
+      if (extendedSearch.trim()) {
+        const q = extendedSearch.toLowerCase();
+        const id = (item.employee_id || '').toLowerCase();
+        const name = (item.name || '').toLowerCase();
+        const dept = (item.department || '').toLowerCase();
+        if (!id.includes(q) && !name.includes(q) && !dept.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [extendedAbsences, extendedStatusFilter, deptFilter, extendedSearch]);
+
+  const extendedStats = useMemo(() => {
+    const total = extendedAbsences.length;
+    const away = extendedAbsences.filter(b => b.status === 'Currently Away').length;
+    const returned = extendedAbsences.filter(b => b.status === 'Returned').length;
+    let maxOverstay = 0;
+    extendedAbsences.forEach(b => {
+      if ((b.overstay_minutes || 0) > maxOverstay) maxOverstay = b.overstay_minutes;
+    });
+    const maxOverstayStr = maxOverstay > 0 ? (maxOverstay >= 60 ? `${Math.floor(maxOverstay / 60)}h ${maxOverstay % 60}m` : `${maxOverstay}m`) : '0m';
+    return { total, away, returned, maxOverstay, maxOverstayStr };
+  }, [extendedAbsences]);
 
   // Regular sorted visitors for 'details' tab
   const sortedVisitors = useMemo(() => {
@@ -544,6 +786,45 @@ export default function EmployeeRegistry({
             Employee Details
           </button>
 
+          {/* Tab 1.5: Attendance & Shift Ledger */}
+          <button
+            onClick={() => { switchSection('ledger'); }}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '8px 16px',
+              borderRadius: '8px',
+              border: 'none',
+              fontSize: '12px',
+              fontWeight: '700',
+              cursor: 'pointer',
+              backgroundColor: activeSection === 'ledger' ? '#0f766e' : 'transparent',
+              color: activeSection === 'ledger' ? '#ffffff' : '#64748b',
+              boxShadow: activeSection === 'ledger' ? '0 2px 4px rgba(15, 118, 110, 0.25)' : 'none',
+              transition: 'all 0.15s ease'
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+              <line x1="16" y1="2" x2="16" y2="6"/>
+              <line x1="8" y1="2" x2="8" y2="6"/>
+              <line x1="3" y1="10" x2="21" y2="10"/>
+            </svg>
+            Attendance & Shift Ledger
+            <span style={{
+              padding: '1px 8px',
+              borderRadius: '9999px',
+              fontSize: '11px',
+              fontWeight: '800',
+              backgroundColor: activeSection === 'ledger' ? '#ffffff' : '#ccfbf1',
+              color: activeSection === 'ledger' ? '#0f766e' : '#0f766e',
+              boxShadow: activeSection === 'ledger' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
+            }}>
+              {enrolledStaffCount}
+            </span>
+          </button>
+
           {/* Tab 2: Absent from Premises */}
           <button
             onClick={() => switchSection('absent')}
@@ -698,6 +979,35 @@ export default function EmployeeRegistry({
               </span>
             </button>
           )}
+
+          {/* Shift End Bulk Check-Out Button */}
+          <button
+            type="button"
+            onClick={() => {
+              const onDuty = (ledgerData?.employees || []).filter(e => e.status === 'On Duty').map(e => e.employee_id);
+              setBulkSelectedIds(new Set(onDuty));
+              setBulkOpen(true);
+            }}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '7px 14px',
+              borderRadius: '8px',
+              backgroundColor: '#ea580c',
+              color: '#ffffff',
+              border: 'none',
+              fontSize: '12px',
+              fontWeight: '800',
+              cursor: 'pointer',
+              boxShadow: '0 2px 4px rgba(234, 88, 12, 0.25)',
+              transition: 'all 0.15s ease'
+            }}
+            title="Perform bulk departure check-out for shifts ending at 5:00 PM or custom time"
+          >
+            <span>🚪</span>
+            <span>Shift End Bulk Check-Out</span>
+          </button>
 
           {/* Action button based on active section */}
           {activeSection === 'watchlist' ? (
@@ -1390,8 +1700,19 @@ export default function EmployeeRegistry({
                       </td>
 
                       {/* Duty Hours */}
-                      <td style={{ padding: '10px 14px', fontWeight: '700', color: '#0f172a', whiteSpace: 'nowrap' }}>
-                        {dur}
+                      <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                        <div style={{ fontWeight: '800', color: '#0f172a' }}>
+                          {v.working_str || dur}
+                        </div>
+                        {v.today_check_in && (
+                          <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px' }}>
+                            <span>☕ {v.break_str || '0m'}</span>
+                            <span style={{ margin: '0 4px', color: '#cbd5e1' }}>•</span>
+                            <span style={{ fontWeight: '700', color: ((v.productivity_pct ?? 100) >= 85 ? '#059669' : ((v.productivity_pct ?? 100) >= 70 ? '#d97706' : '#dc2626')) }}>
+                              ⚡ {v.productivity_pct != null ? `${v.productivity_pct}%` : '100%'}
+                            </span>
+                          </div>
+                        )}
                       </td>
 
                       {/* Actions */}
@@ -1418,6 +1739,28 @@ export default function EmployeeRegistry({
                               border: isNotCheckedIn ? '1px solid #e2e8f0' : 'none' }}>
                               {isNotCheckedIn ? '— NOT IN PREMISES' : (isCheckedOut ? '✓ OUT' : '● ON DUTY')}
                             </span>
+                            {isEnrolled && !isNotCheckedIn && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openSingleOverride(v, isCheckedOut ? 'check_in' : 'check_out');
+                                }}
+                                style={{
+                                  padding: '3px 8px',
+                                  fontSize: '11px',
+                                  fontWeight: '700',
+                                  borderRadius: '5px',
+                                  border: 'none',
+                                  backgroundColor: isCheckedOut ? '#059669' : '#ea580c',
+                                  color: '#fff',
+                                  cursor: 'pointer'
+                                }}
+                                title={isCheckedOut ? "Manual Check-In back on duty" : "Manual Check-Out"}
+                              >
+                                {isCheckedOut ? '🟢 In' : '🚪 Out'}
+                              </button>
+                            )}
                             {isBlk ? (
                               <button
                                 onClick={async (e) => {
@@ -1540,14 +1883,14 @@ export default function EmployeeRegistry({
         </>
       )}
 
-      {/* VIEW 2: ABSENT FROM PREMISES (NEW REQUESTED TAB) */}
-      {activeSection === 'absent' && (
+      {/* VIEW 1.5: ATTENDANCE & SHIFT LEDGER (DAILY WORK, BREAK & PRODUCTIVITY) */}
+      {activeSection === 'ledger' && (
         <div>
-          {/* Executive Absence Insight Banner */}
+          {/* Executive Shift Summary Header Banner */}
           <div style={{
             padding: '16px 20px',
-            backgroundColor: '#fff7ed',
-            borderBottom: '1px solid #fed7aa',
+            backgroundColor: '#f0fdfa',
+            borderBottom: '1px solid #ccfbf1',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
@@ -1559,332 +1902,549 @@ export default function EmployeeRegistry({
                 width: '42px',
                 height: '42px',
                 borderRadius: '10px',
-                backgroundColor: '#fed7aa',
+                backgroundColor: '#0f766e',
+                color: '#ffffff',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                color: '#c2410c'
+                fontSize: '20px',
+                boxShadow: '0 4px 6px -1px rgba(15, 118, 110, 0.25)'
               }}>
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
-                </svg>
+                📋
               </div>
               <div>
-                <h4 style={{ margin: 0, fontSize: '14px', fontWeight: '800', color: '#9a3412' }}>
-                  Shift Working Hours — Absence & Outside-Premises Monitoring
+                <h4 style={{ margin: 0, fontSize: '15px', fontWeight: '800', color: '#134e4a' }}>
+                  Daily Attendance & Shift Movement Ledger
                 </h4>
-                <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#c2410c' }}>
-                  Tracks employees who checked in today, crossed the exit gate during working hours, and have not yet been detected entering back.
+                <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#0f766e' }}>
+                  Full shift audit for <strong>{ledgerDate}</strong>: First In, Final Out, Working vs Break Intervals, and Biometric Productivity.
                 </p>
               </div>
             </div>
 
             {/* Quick Metrics */}
-            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-              <div style={{ backgroundColor: '#ffffff', border: '1px solid #fdba74', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
-                <div style={{ fontSize: '10px', fontWeight: '800', color: '#9a3412', textTransform: 'uppercase' }}>Currently Away</div>
-                <div style={{ fontSize: '15px', fontWeight: '900', color: '#ea580c' }}>{absentStats.total} Staff</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+              <div style={{ textAlign: 'center', padding: '6px 12px', backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #99f6e4', minWidth: '70px' }}>
+                <div style={{ fontSize: '16px', fontWeight: '800', color: '#0f766e' }}>{ledgerData?.summary?.total_enrolled ?? enrolledStaffCount}</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase' }}>Enrolled</div>
               </div>
-              <div style={{ backgroundColor: '#ffffff', border: '1px solid #fdba74', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
-                <div style={{ fontSize: '10px', fontWeight: '800', color: '#9a3412', textTransform: 'uppercase' }}>Avg Time Away</div>
-                <div style={{ fontSize: '15px', fontWeight: '900', color: '#c2410c' }}>{absentStats.avgStr}</div>
+              <div style={{ textAlign: 'center', padding: '6px 12px', backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #bbf7d0', minWidth: '70px' }}>
+                <div style={{ fontSize: '16px', fontWeight: '800', color: '#15803d' }}>{ledgerData?.summary?.on_duty_count ?? 0}</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase' }}>On Duty</div>
               </div>
-              <div style={{ backgroundColor: '#ffffff', border: '1px solid #fdba74', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
-                <div style={{ fontSize: '10px', fontWeight: '800', color: '#9a3412', textTransform: 'uppercase' }}>Over 30 Mins</div>
-                <div style={{ fontSize: '15px', fontWeight: '900', color: '#b91c1c' }}>{absentStats.over30} Staff</div>
+              <div style={{ textAlign: 'center', padding: '6px 12px', backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #fed7aa', minWidth: '70px' }}>
+                <div style={{ fontSize: '16px', fontWeight: '800', color: '#c2410c' }}>{ledgerData?.summary?.checked_out_count ?? 0}</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase' }}>Completed</div>
+              </div>
+              <div style={{ textAlign: 'center', padding: '6px 12px', backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #e2e8f0', minWidth: '70px' }}>
+                <div style={{ fontSize: '16px', fontWeight: '800', color: '#64748b' }}>{ledgerData?.summary?.absent_count ?? 0}</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase' }}>Absent</div>
+              </div>
+              <div style={{ textAlign: 'center', padding: '6px 14px', backgroundColor: '#0f766e', borderRadius: '8px', color: '#ffffff', minWidth: '85px' }}>
+                <div style={{ fontSize: '16px', fontWeight: '800' }}>{ledgerData?.summary?.avg_working_str ?? '0h 00m'}</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', opacity: 0.9, textTransform: 'uppercase' }}>Avg Working</div>
+              </div>
+              <div style={{ textAlign: 'center', padding: '6px 14px', backgroundColor: '#fff7ed', borderRadius: '8px', border: '1px solid #fed7aa', minWidth: '80px' }}>
+                <div style={{ fontSize: '16px', fontWeight: '800', color: '#c2410c' }}>{ledgerData?.summary?.avg_break_str ?? '0h 00m'}</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', color: '#9a3412', textTransform: 'uppercase' }}>Avg Break</div>
+              </div>
+              <div style={{ textAlign: 'center', padding: '6px 14px', backgroundColor: '#f0fdf4', borderRadius: '8px', border: '1px solid #bbf7d0', minWidth: '80px' }}>
+                <div style={{ fontSize: '16px', fontWeight: '800', color: '#16a34a' }}>{ledgerData?.summary?.avg_productivity_pct ?? 0}%</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', color: '#15803d', textTransform: 'uppercase' }}>Productivity</div>
               </div>
             </div>
           </div>
 
-          {/* Absence Filter Bar */}
-          <div style={{ padding: '10px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', backgroundColor: '#fafbfc' }}>
-            {/* Search */}
-            <div style={{ position: 'relative' }}>
-              <svg style={{ position: 'absolute', left: '9px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-              <input
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                placeholder="Search absent employee..."
-                style={{ paddingLeft: '28px', paddingRight: '10px', paddingTop: '6px', paddingBottom: '6px', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', color: '#0f172a', outline: 'none', width: '210px' }}
-              />
-            </div>
-
-            {/* Severity Sub-Filter Pills */}
-            <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
-              {[
-                ['all', `All Absent (${absentStaff.length})`],
-                ['lt30', `< 30m (${absentStaff.filter(s => s.live_missing_mins < 30).length})`],
-                ['gt30', `> 30m (${absentStats.over30})`],
-                ['gt60', `> 1h (${absentStats.over60})`]
-              ].map(([id, label]) => (
-                <button
-                  key={id}
-                  onClick={() => setAbsentFilter(id)}
+          {/* Ledger Control Bar: Date, Search, Filters, Bulk Action */}
+          <div style={{
+            padding: '12px 20px',
+            backgroundColor: '#ffffff',
+            borderBottom: '1px solid #f1f5f9',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '12px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              {/* Date Selector */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#f8fafc', padding: '4px 8px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                <span style={{ fontSize: '11px', fontWeight: '800', color: '#475569' }}>📅 Shift Date:</span>
+                <input
+                  type="date"
+                  value={ledgerDate}
+                  onChange={(e) => setLedgerDate(e.target.value)}
                   style={{
-                    padding: '3px 10px',
+                    padding: '3px 6px',
                     borderRadius: '5px',
-                    border: 'none',
-                    fontSize: '11px',
-                    fontWeight: '700',
-                    cursor: 'pointer',
-                    backgroundColor: absentFilter === id ? '#ffffff' : 'transparent',
-                    color: absentFilter === id ? '#ea580c' : '#64748b',
-                    boxShadow: absentFilter === id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
+                    border: '1px solid #cbd5e1',
+                    fontSize: '12px',
+                    fontFamily: 'var(--font-mono)',
+                    backgroundColor: '#fff',
+                    outline: 'none',
+                    cursor: 'pointer'
                   }}
-                >
-                  {label}
-                </button>
-              ))}
+                />
+              </div>
+
+              {/* Status Filters */}
+              <div style={{ display: 'flex', gap: '4px', backgroundColor: '#f1f5f9', padding: '3px', borderRadius: '8px' }}>
+                {[
+                  ['all', `All (${ledgerData?.employees?.length ?? 0})`],
+                  ['on_duty', `🟢 On Duty (${ledgerData?.summary?.on_duty_count ?? 0})`],
+                  ['checked_out', `✓ Checked Out (${ledgerData?.summary?.checked_out_count ?? 0})`],
+                  ['absent', `⚪ Absent (${ledgerData?.summary?.absent_count ?? 0})`]
+                ].map(([sid, slabel]) => (
+                  <button
+                    key={sid}
+                    type="button"
+                    onClick={() => setLedgerStatusFilter(sid)}
+                    style={{
+                      padding: '4px 10px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      fontSize: '11px',
+                      fontWeight: '700',
+                      cursor: 'pointer',
+                      backgroundColor: ledgerStatusFilter === sid ? '#ffffff' : 'transparent',
+                      color: ledgerStatusFilter === sid ? '#0f766e' : '#64748b',
+                      boxShadow: ledgerStatusFilter === sid ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
+                    }}
+                  >
+                    {slabel}
+                  </button>
+                ))}
+              </div>
+
+              {/* Department Filter */}
+              <select
+                value={ledgerDeptFilter}
+                onChange={(e) => setLedgerDeptFilter(e.target.value)}
+                style={{
+                  padding: '5px 10px',
+                  borderRadius: '6px',
+                  border: '1px solid #cbd5e1',
+                  fontSize: '12px',
+                  backgroundColor: '#fff',
+                  outline: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                <option value="all">All Departments</option>
+                {DEPARTMENTS.map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+
+              {/* Search */}
+              <div style={{ position: 'relative' }}>
+                <input
+                  type="text"
+                  placeholder="Search staff name, ID..."
+                  value={ledgerSearch}
+                  onChange={(e) => setLedgerSearch(e.target.value)}
+                  style={{
+                    padding: '5px 10px 5px 28px',
+                    borderRadius: '6px',
+                    border: '1px solid #cbd5e1',
+                    fontSize: '12px',
+                    width: '180px',
+                    outline: 'none'
+                  }}
+                />
+                <span style={{ position: 'absolute', left: '8px', top: '5px', fontSize: '12px', color: '#94a3b8' }}>🔍</span>
+              </div>
             </div>
 
-            {/* Department Dropdown */}
-            <select
-              value={deptFilter}
-              onChange={e => setDeptFilter(e.target.value)}
-              style={{ padding: '6px 10px', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', color: '#334155', outline: 'none', cursor: 'pointer' }}
-            >
-              <option value="all">All Departments</option>
-              {Object.entries(deptCounts).sort((a, b) => b[1] - a[1]).map(([d, c]) => (
-                <option key={d} value={d}>{d}</option>
-              ))}
-            </select>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={() => fetchLedger(true)}
+                disabled={ledgerSyncing}
+                style={{
+                  padding: '5px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid #cbd5e1',
+                  backgroundColor: '#ffffff',
+                  color: '#475569',
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  cursor: ledgerSyncing ? 'not-allowed' : 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                }}
+                title="Refresh attendance ledger in background"
+              >
+                <span style={{
+                  display: 'inline-block',
+                  transform: ledgerSyncing ? 'rotate(180deg)' : 'none',
+                  transition: 'transform 0.4s ease'
+                }}>🔄</span>
+                <span>{ledgerSyncing ? 'Syncing...' : 'Refresh'}</span>
+              </button>
 
-            <span style={{ marginLeft: 'auto', fontSize: '11px', color: '#64748b', fontWeight: '600' }}>
-              Sorted by: <strong>Longest Absence First</strong> · Live auto-updated
-            </span>
+              <button
+                type="button"
+                onClick={() => {
+                  const onDuty = (ledgerData?.employees || []).filter(e => e.status === 'On Duty').map(e => e.employee_id);
+                  setBulkSelectedIds(new Set(onDuty));
+                  setBulkDate(ledgerDate);
+                  setBulkOpen(true);
+                }}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '6px 14px',
+                  borderRadius: '7px',
+                  backgroundColor: '#ea580c',
+                  color: '#ffffff',
+                  border: 'none',
+                  fontSize: '12px',
+                  fontWeight: '800',
+                  cursor: 'pointer',
+                  boxShadow: '0 2px 4px rgba(234, 88, 12, 0.2)'
+                }}
+              >
+                <span>🚪</span>
+                <span>Shift End Bulk Check-Out</span>
+              </button>
+            </div>
           </div>
 
-          {/* Absent Staff Table */}
-          <div style={{ overflowX: 'auto' }}>
+          {/* Ledger Table — with fixed minimum height to guarantee zero layout shifts */}
+          <div style={{ overflowX: 'auto', minHeight: '300px' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
               <thead>
-                <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
-                  {['Employee ID', 'Employee / Face', 'Department', 'Shift Check-In', 'Premises Exit Time', 'Duty Before Exit', 'Time Missing / Absent', 'Exit Camera / Gate', 'Actions'].map(h => (
-                    <th key={h} style={{ padding: '10px 14px', fontSize: '11px', fontWeight: '800', color: '#475569', whiteSpace: 'nowrap' }}>{h}</th>
-                  ))}
+                <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#475569' }}>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Employee</th>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Status</th>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>First In (Entry)</th>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Final Out (Exit)</th>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Working Time</th>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Break Time</th>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Shift Span</th>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Productivity</th>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Passages</th>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Quick Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredAbsent.length === 0 ? (
+                {(!ledgerData && ledgerLoading) ? (
                   <tr>
-                    <td colSpan="9" style={{ padding: '36px', textAlign: 'center', color: '#64748b' }}>
-                      <div style={{ fontSize: '14px', fontWeight: '700', color: '#059669', marginBottom: '4px' }}>
-                        ✓ All Staff Are Currently Inside Premises
-                      </div>
-                      <div style={{ fontSize: '12px', color: '#94a3b8' }}>
-                        No employees currently detected as departed from premises during their active shift.
+                    <td colSpan="10" style={{ padding: '36px', textAlign: 'center', color: '#64748b' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                        <span>⏳</span>
+                        <span>Loading shift attendance ledger...</span>
                       </div>
                     </td>
                   </tr>
+                ) : filteredLedgerEmployees.length === 0 ? (
+                  <tr>
+                    <td colSpan="10" style={{ padding: '36px', textAlign: 'center', color: '#94a3b8' }}>
+                      No staff attendance records found for {ledgerDate} matching current filters.
+                    </td>
+                  </tr>
                 ) : (
-                  filteredAbsent.map((v, idx) => {
-                    const thumb = v.crops?.[0] || v.photo_b64 || null;
-                    const displayName = v.name || v.display_name || v.id;
-                    const isEnrolled = Boolean(v.is_enrolled);
-                    const missingMins = v.live_missing_mins || 1;
-                    const missingStr = v.live_missing_str || `${missingMins}m`;
-
-                    // Severity classification
-                    let badgeBg = '#fef3c7';
-                    let badgeColor = '#b45309';
-                    let severityLabel = 'Break / Away';
-                    if (missingMins >= 60) {
-                      badgeBg = '#fee2e2';
-                      badgeColor = '#b91c1c';
-                      severityLabel = 'Critical Absence';
-                    } else if (missingMins >= 30) {
-                      badgeBg = '#ffedd5';
-                      badgeColor = '#c2410c';
-                      severityLabel = 'Extended Absence';
-                    }
+                  filteredLedgerEmployees.map((emp, idx) => {
+                    const prod = typeof emp.productivity_pct === 'number' ? emp.productivity_pct : 100.0;
+                    const prodColor = prod >= 85 ? '#059669' : (prod >= 70 ? '#d97706' : '#dc2626');
+                    const prodBg = prod >= 85 ? '#ecfdf5' : (prod >= 70 ? '#fffbeb' : '#fef2f2');
+                    const isOnDuty = emp.status === 'On Duty';
+                    const isCheckedOut = emp.status === 'Checked Out';
+                    const isAbsent = emp.status === 'Absent';
+                    const avatar = emp.photo_b64 || (emp.crops && emp.crops[0]);
 
                     return (
                       <tr
-                        key={v.id}
-                        onClick={() => {
-                          if (onSelectEmployee) onSelectEmployee(v.id);
-                        }}
+                        key={emp.employee_id}
                         style={{
                           borderBottom: '1px solid #f1f5f9',
-                          backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fffaf5',
-                          cursor: 'pointer',
-                          transition: 'background 0.1s'
+                          backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fafbfc',
+                          transition: 'background 0.15s ease'
                         }}
-                        onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#fef2f2'; }}
-                        onMouseLeave={e => { e.currentTarget.style.backgroundColor = idx % 2 === 0 ? '#ffffff' : '#fffaf5'; }}
-                        title="Click row to view complete face captures, entry/exit CCTV footage, and movement journey"
+                        onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f0fdfa'}
+                        onMouseLeave={e => e.currentTarget.style.backgroundColor = idx % 2 === 0 ? '#ffffff' : '#fafbfc'}
                       >
-                        {/* ID */}
-                        <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                          <span style={{ fontFamily: 'var(--font-mono)', fontWeight: '800', fontSize: '12px', color: '#0284c7' }}>
-                            {v.id}
-                          </span>
-                        </td>
-
-                        {/* Thumbnail + Name + Badge */}
-                        <td style={{ padding: '10px 14px', minWidth: '190px' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        {/* Employee */}
+                        <td style={{ padding: '10px 14px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                             <div style={{
                               width: '36px',
                               height: '36px',
-                              borderRadius: '7px',
+                              borderRadius: '8px',
                               overflow: 'hidden',
-                              border: '1.5px solid #fdba74',
-                              backgroundColor: '#fff7ed',
+                              backgroundColor: '#e2e8f0',
+                              border: '1px solid #cbd5e1',
                               flexShrink: 0,
                               display: 'flex',
                               alignItems: 'center',
                               justifyContent: 'center'
                             }}>
-                              {thumb ? (
+                              {avatar ? (
                                 <img
-                                  src={thumb.startsWith('data:') ? thumb : `data:image/jpeg;base64,${thumb}`}
-                                  alt={v.id}
+                                  src={avatar.startsWith('data:') ? avatar : `data:image/jpeg;base64,${avatar}`}
+                                  alt={emp.name}
                                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                                 />
                               ) : (
-                                <span style={{ fontSize: '11px', fontWeight: '800', color: '#9a3412' }}>
-                                  {displayName.slice(0, 2).toUpperCase()}
+                                <span style={{ fontSize: '11px', fontWeight: '800', color: '#0f766e' }}>
+                                  {(emp.name || emp.employee_id).slice(0, 2).toUpperCase()}
                                 </span>
                               )}
                             </div>
-
                             <div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <span style={{ fontWeight: isEnrolled ? '700' : '600', color: '#0f172a' }}>
-                                  {displayName}
-                                </span>
-                                <span style={{
-                                  fontSize: '9px',
-                                  fontWeight: '800',
-                                  padding: '1px 5px',
-                                  borderRadius: '4px',
-                                  backgroundColor: '#fee2e2',
-                                  color: '#dc2626',
-                                  border: '1px solid #fca5a5'
-                                }}>
-                                  ● OUT
-                                </span>
+                              <div style={{ fontWeight: '800', color: '#0f172a', fontSize: '13px' }}>
+                                {emp.name || emp.employee_id}
                               </div>
-                              <div style={{ fontSize: '10px', color: '#64748b', marginTop: '1px' }}>
-                                {v.designation || 'Staff Member'}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
+                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#0284c7', fontWeight: '700' }}>
+                                  {emp.employee_id}
+                                </span>
+                                <span style={{ color: '#cbd5e1' }}>•</span>
+                                <span style={{ fontSize: '11px', color: '#64748b' }}>
+                                  {emp.department}
+                                </span>
                               </div>
                             </div>
                           </div>
                         </td>
 
-                        {/* Department */}
-                        <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                          <span style={{ color: '#334155', fontWeight: '600' }}>
-                            {v.department || 'General Staff'}
-                          </span>
+                        {/* Status */}
+                        <td style={{ padding: '10px 14px' }}>
+                          {isOnDuty && (
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                              padding: '3px 8px',
+                              borderRadius: '9999px',
+                              backgroundColor: '#ecfdf5',
+                              color: '#047857',
+                              fontWeight: '700',
+                              fontSize: '11px',
+                              border: '1px solid #a7f3d0'
+                            }}>
+                              <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#10b981' }}></span>
+                              On Duty
+                            </span>
+                          )}
+                          {isCheckedOut && (
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                              padding: '3px 8px',
+                              borderRadius: '9999px',
+                              backgroundColor: '#f1f5f9',
+                              color: '#475569',
+                              fontWeight: '700',
+                              fontSize: '11px',
+                              border: '1px solid #cbd5e1'
+                            }}>
+                              ✓ Checked Out
+                            </span>
+                          )}
+                          {isAbsent && (
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                              padding: '3px 8px',
+                              borderRadius: '9999px',
+                              backgroundColor: '#f8fafc',
+                              color: '#94a3b8',
+                              fontWeight: '600',
+                              fontSize: '11px',
+                              border: '1px solid #e2e8f0'
+                            }}>
+                              ⚪ Absent
+                            </span>
+                          )}
                         </td>
 
-                        {/* Shift Check-In */}
-                        <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#0369a1', fontWeight: '700' }}>
-                            {fmtTime(v.today_check_in)}
+                        {/* First In */}
+                        <td style={{ padding: '10px 14px' }}>
+                          <div style={{ fontFamily: 'var(--font-mono)', fontWeight: '700', color: '#0369a1' }}>
+                            {emp.check_in_display || '—'}
                           </div>
-                          <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                            Staff Inbound Entry
-                          </div>
-                        </td>
-
-                        {/* Premises Exit Time */}
-                        <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#b91c1c', fontWeight: '700' }}>
-                            {fmtTime(v.exit_time_iso || v.today_check_out || v.last_seen)}
-                          </div>
-                          <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                            Departed via Exit Gate
+                          <div style={{ fontSize: '10px', marginTop: '2px' }}>
+                            {emp.is_check_in_manual ? (
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', padding: '1px 5px', borderRadius: '4px', backgroundColor: '#eff6ff', color: '#1d4ed8', fontWeight: '700', border: '1px solid #bfdbfe' }}>
+                                📝 Admin Override
+                              </span>
+                            ) : (
+                              <span style={{ color: '#94a3b8' }}>{emp.check_in_camera_name || emp.check_in_camera || '—'}</span>
+                            )}
                           </div>
                         </td>
 
-                        {/* Duty Before Exit */}
-                        <td style={{ padding: '10px 14px', fontWeight: '700', color: '#0f172a', whiteSpace: 'nowrap' }}>
-                          {v.today_duration_str || `${v.today_duration_mins || 0}m on-site`}
-                        </td>
-
-                        {/* Time Missing / Absent Duration (Live) */}
-                        <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                        {/* Final Out */}
+                        <td style={{ padding: '10px 14px' }}>
                           <div style={{
+                            fontFamily: 'var(--font-mono)',
+                            fontWeight: '700',
+                            color: isCheckedOut ? '#15803d' : (isOnDuty ? '#b45309' : '#94a3b8')
+                          }}>
+                            {isCheckedOut ? (emp.check_out_display || '—') : (isOnDuty ? '● Shift Ongoing' : '—')}
+                          </div>
+                          <div style={{ fontSize: '10px', marginTop: '2px' }}>
+                            {emp.is_check_out_manual ? (
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', padding: '1px 5px', borderRadius: '4px', backgroundColor: '#eff6ff', color: '#1d4ed8', fontWeight: '700', border: '1px solid #bfdbfe' }}>
+                                📝 Admin Override
+                              </span>
+                            ) : (
+                              <span style={{ color: '#94a3b8' }}>
+                                {isCheckedOut ? (emp.check_out_camera_name || 'Exit Gate') : (isOnDuty ? 'In Campus' : '—')}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
+                        {/* Working Time */}
+                        <td style={{ padding: '10px 14px' }}>
+                          <div style={{ fontWeight: '800', color: '#0f172a', fontSize: '13px' }}>
+                            {emp.working_str || '0h 00m'}
+                          </div>
+                          <div style={{ fontSize: '10px', color: '#64748b' }}>
+                            {emp.working_minutes} mins active
+                          </div>
+                        </td>
+
+                        {/* Break Time */}
+                        <td style={{ padding: '10px 14px' }}>
+                          <div style={{ fontWeight: '700', color: (emp.break_minutes > 60 ? '#dc2626' : '#b45309') }}>
+                            {emp.break_str || '0h 00m'}
+                          </div>
+                          <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                            {emp.break_count ? `${emp.break_count} passage breaks` : 'No exit breaks'}
+                          </div>
+                        </td>
+
+                        {/* Shift Span */}
+                        <td style={{ padding: '10px 14px', color: '#64748b', fontWeight: '600' }}>
+                          {emp.shift_span_str || '—'}
+                        </td>
+
+                        {/* Productivity */}
+                        <td style={{ padding: '10px 14px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{
+                              padding: '2px 7px',
+                              borderRadius: '6px',
+                              fontSize: '11px',
+                              fontWeight: '800',
+                              backgroundColor: prodBg,
+                              color: prodColor,
+                              border: `1px solid ${prodColor}33`
+                            }}>
+                              {prod}%
+                            </span>
+                          </div>
+                          <div style={{ width: '48px', height: '4px', backgroundColor: '#e2e8f0', borderRadius: '2px', overflow: 'hidden', marginTop: '3px' }}>
+                            <div style={{ width: `${Math.min(100, prod)}%`, height: '100%', backgroundColor: prodColor }}></div>
+                          </div>
+                        </td>
+
+                        {/* Passages */}
+                        <td style={{ padding: '10px 14px' }}>
+                          <span style={{
                             display: 'inline-flex',
                             alignItems: 'center',
                             gap: '6px',
-                            padding: '4px 10px',
+                            padding: '2px 8px',
                             borderRadius: '6px',
-                            backgroundColor: badgeBg,
-                            color: badgeColor,
-                            fontWeight: '800',
+                            backgroundColor: '#f1f5f9',
                             fontFamily: 'var(--font-mono)',
-                            fontSize: '12px',
-                            boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                            fontSize: '11px',
+                            fontWeight: '700'
                           }}>
-                            <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: badgeColor }} />
-                            <span>{missingStr} missing</span>
-                          </div>
-                          <div style={{ fontSize: '10px', color: badgeColor, fontWeight: '700', marginTop: '2px' }}>
-                            {severityLabel}
-                          </div>
-                        </td>
-
-                        {/* Exit Camera / Gate */}
-                        <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                          <div style={{ fontSize: '11px', fontWeight: '700', color: '#334155' }}>
-                            {v.last_camera_name || v.camera_name || 'Staff Check-Out Exit'}
-                          </div>
-                          <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                            Gate 02 Departure
-                          </div>
+                            <span style={{ color: '#15803d' }}>{emp.in_count} In</span>
+                            <span style={{ color: '#94a3b8' }}>/</span>
+                            <span style={{ color: '#b45309' }}>{emp.out_count} Out</span>
+                          </span>
                         </td>
 
                         {/* Actions */}
                         <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            {isOnDuty && (
+                              <button
+                                type="button"
+                                onClick={() => openSingleOverride(emp, 'check_out')}
+                                style={{
+                                  padding: '4px 10px',
+                                  borderRadius: '6px',
+                                  border: 'none',
+                                  backgroundColor: '#ea580c',
+                                  color: '#ffffff',
+                                  fontSize: '11px',
+                                  fontWeight: '700',
+                                  cursor: 'pointer',
+                                  boxShadow: '0 1px 2px rgba(234, 88, 12, 0.2)'
+                                }}
+                                title="Record departure check-out for this employee"
+                              >
+                                🚪 Check Out
+                              </button>
+                            )}
+
+                            {isCheckedOut && (
+                              <button
+                                type="button"
+                                onClick={() => openSingleOverride(emp, 'check_in')}
+                                style={{
+                                  padding: '4px 10px',
+                                  borderRadius: '6px',
+                                  border: 'none',
+                                  backgroundColor: '#059669',
+                                  color: '#ffffff',
+                                  fontSize: '11px',
+                                  fontWeight: '700',
+                                  cursor: 'pointer'
+                                }}
+                                title="Check-in staff member back into campus"
+                              >
+                                🟢 Check In
+                              </button>
+                            )}
+
+                            {isAbsent && (
+                              <button
+                                type="button"
+                                onClick={() => openSingleOverride(emp, 'check_in')}
+                                style={{
+                                  padding: '4px 8px',
+                                  borderRadius: '6px',
+                                  border: '1px solid #cbd5e1',
+                                  backgroundColor: '#ffffff',
+                                  color: '#0f766e',
+                                  fontSize: '11px',
+                                  fontWeight: '700',
+                                  cursor: 'pointer'
+                                }}
+                                title="Manual arrival entry for absent employee"
+                              >
+                                + Check In
+                              </button>
+                            )}
+
                             <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (onSelectEmployee) onSelectEmployee(v.id);
-                              }}
-                              style={{
-                                padding: '4px 10px',
-                                borderRadius: '6px',
-                                backgroundColor: '#fff7ed',
-                                border: '1px solid #fdba74',
-                                fontSize: '11px',
-                                cursor: 'pointer',
-                                color: '#c2410c',
-                                fontWeight: '800',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '4px'
-                              }}
-                              title="Inspect biometric photos and movement journey"
-                            >
-                              View Journey ➔
-                            </button>
-                            <button
-                              onClick={(e) => handleDeleteEmployee(v.id, v.name || v.id, e)}
+                              type="button"
+                              onClick={() => onSelectEmployee(emp.employee_id)}
                               style={{
                                 padding: '4px 8px',
                                 borderRadius: '6px',
-                                backgroundColor: '#fff1f2',
-                                border: '1px solid #fecdd3',
+                                border: '1px solid #bae6fd',
+                                backgroundColor: '#f0f9ff',
+                                color: '#0284c7',
                                 fontSize: '11px',
-                                cursor: 'pointer',
-                                color: '#e11d48',
                                 fontWeight: '700',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '3px'
+                                cursor: 'pointer'
                               }}
-                              title="Permanently delete profile and records"
+                              title="Audit full CCTV movement journey"
                             >
-                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                                <polyline points="3 6 5 6 21 6"></polyline>
-                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                              </svg>
-                              Delete
+                              🔍 Journey
                             </button>
                           </div>
                         </td>
@@ -1895,6 +2455,896 @@ export default function EmployeeRegistry({
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* VIEW 2: ABSENT FROM PREMISES & EXTENDED ABSENCE AUDIT LOG */}
+      {activeSection === 'absent' && (
+        <div>
+          {/* Sub-Navigation Switcher for Live Absent vs Permanent Extended Absence Log */}
+          <div style={{
+            padding: '12px 20px',
+            backgroundColor: '#fff7ed',
+            borderBottom: '1px solid #fed7aa',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '12px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={() => setAbsentSubTab('currently_away')}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '7px 16px',
+                  borderRadius: '8px',
+                  border: absentSubTab === 'currently_away' ? '1px solid #ea580c' : '1px solid #fed7aa',
+                  fontSize: '12px',
+                  fontWeight: '800',
+                  cursor: 'pointer',
+                  backgroundColor: absentSubTab === 'currently_away' ? '#ea580c' : '#ffffff',
+                  color: absentSubTab === 'currently_away' ? '#ffffff' : '#9a3412',
+                  boxShadow: absentSubTab === 'currently_away' ? '0 2px 4px rgba(234, 88, 12, 0.25)' : 'none',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: absentSubTab === 'currently_away' ? '#ffffff' : '#ea580c' }} />
+                🔴 Currently Away (Live Shift)
+                <span style={{
+                  padding: '1px 7px',
+                  borderRadius: '9999px',
+                  fontSize: '10px',
+                  fontWeight: '900',
+                  backgroundColor: absentSubTab === 'currently_away' ? 'rgba(255,255,255,0.25)' : '#ffedd5',
+                  color: absentSubTab === 'currently_away' ? '#ffffff' : '#9a3412'
+                }}>
+                  {absentStaff.length}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAbsentSubTab('extended_log')}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '7px 16px',
+                  borderRadius: '8px',
+                  border: absentSubTab === 'extended_log' ? '1px solid #b91c1c' : '1px solid #fecdd3',
+                  fontSize: '12px',
+                  fontWeight: '800',
+                  cursor: 'pointer',
+                  backgroundColor: absentSubTab === 'extended_log' ? '#b91c1c' : '#ffffff',
+                  color: absentSubTab === 'extended_log' ? '#ffffff' : '#991b1b',
+                  boxShadow: absentSubTab === 'extended_log' ? '0 2px 4px rgba(185, 28, 28, 0.25)' : 'none',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+                ⚠️ Extended Break & Absence Log (&gt;60 mins)
+                <span style={{
+                  padding: '1px 7px',
+                  borderRadius: '9999px',
+                  fontSize: '10px',
+                  fontWeight: '900',
+                  backgroundColor: absentSubTab === 'extended_log' ? 'rgba(255,255,255,0.25)' : '#fee2e2',
+                  color: absentSubTab === 'extended_log' ? '#ffffff' : '#991b1b'
+                }}>
+                  {extendedAbsences.length}
+                </span>
+              </button>
+            </div>
+
+            {absentSubTab === 'extended_log' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '11px', fontWeight: '800', color: '#991b1b' }}>📅 Shift Date:</span>
+                <input
+                  type="date"
+                  value={ledgerDate}
+                  onChange={(e) => setLedgerDate(e.target.value)}
+                  style={{
+                    padding: '5px 10px',
+                    borderRadius: '7px',
+                    border: '1px solid #fca5a5',
+                    fontSize: '11px',
+                    fontWeight: '700',
+                    backgroundColor: '#ffffff',
+                    color: '#991b1b',
+                    cursor: 'pointer',
+                    outline: 'none'
+                  }}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* SUB-VIEW 1: CURRENTLY AWAY (LIVE SHIFT) */}
+          {absentSubTab === 'currently_away' && (
+            <div>
+              {/* Executive Absence Insight Banner */}
+              <div style={{
+                padding: '16px 20px',
+                backgroundColor: '#fff7ed',
+                borderBottom: '1px solid #fed7aa',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: '16px'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div style={{
+                    width: '42px',
+                    height: '42px',
+                    borderRadius: '10px',
+                    backgroundColor: '#fed7aa',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#c2410c'
+                  }}>
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <h4 style={{ margin: 0, fontSize: '14px', fontWeight: '800', color: '#9a3412' }}>
+                      Shift Working Hours — Live Absence Monitoring
+                    </h4>
+                    <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#c2410c' }}>
+                      Tracks on-duty employees who crossed the exit gate during working hours and have not yet returned. Checked-out employees are excluded.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Quick Metrics */}
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #fdba74', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#9a3412', textTransform: 'uppercase' }}>Currently Away</div>
+                    <div style={{ fontSize: '15px', fontWeight: '900', color: '#ea580c' }}>{absentStats.total} Staff</div>
+                  </div>
+                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #fdba74', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#9a3412', textTransform: 'uppercase' }}>Avg Time Away</div>
+                    <div style={{ fontSize: '15px', fontWeight: '900', color: '#c2410c' }}>{absentStats.avgStr}</div>
+                  </div>
+                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #fdba74', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#9a3412', textTransform: 'uppercase' }}>Over 30 Mins</div>
+                    <div style={{ fontSize: '15px', fontWeight: '900', color: '#b91c1c' }}>{absentStats.over30} Staff</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Absence Filter Bar */}
+              <div style={{ padding: '10px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', backgroundColor: '#fafbfc' }}>
+                {/* Search */}
+                <div style={{ position: 'relative' }}>
+                  <svg style={{ position: 'absolute', left: '9px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                  <input
+                    value={search}
+                    onChange={e => setSearch(e.target.value)}
+                    placeholder="Search absent employee..."
+                    style={{ paddingLeft: '28px', paddingRight: '10px', paddingTop: '6px', paddingBottom: '6px', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', color: '#0f172a', outline: 'none', width: '210px' }}
+                  />
+                </div>
+
+                {/* Severity Sub-Filter Pills */}
+                <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
+                  {[
+                    ['all', `All Absent (${absentStaff.length})`],
+                    ['lt30', `< 30m (${absentStaff.filter(s => s.live_missing_mins < 30).length})`],
+                    ['gt30', `> 30m (${absentStats.over30})`],
+                    ['gt60', `> 1h (${absentStats.over60})`]
+                  ].map(([id, label]) => (
+                    <button
+                      key={id}
+                      onClick={() => setAbsentFilter(id)}
+                      style={{
+                        padding: '3px 10px',
+                        borderRadius: '5px',
+                        border: 'none',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        cursor: 'pointer',
+                        backgroundColor: absentFilter === id ? '#ffffff' : 'transparent',
+                        color: absentFilter === id ? '#ea580c' : '#64748b',
+                        boxShadow: absentFilter === id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Department Dropdown */}
+                <select
+                  value={deptFilter}
+                  onChange={e => setDeptFilter(e.target.value)}
+                  style={{ padding: '6px 10px', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', color: '#334155', outline: 'none', cursor: 'pointer' }}
+                >
+                  <option value="all">All Departments</option>
+                  {Object.entries(deptCounts).sort((a, b) => b[1] - a[1]).map(([d, c]) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+
+                <span style={{ marginLeft: 'auto', fontSize: '11px', color: '#64748b', fontWeight: '600' }}>
+                  Sorted by: <strong>Longest Absence First</strong> · Live auto-updated
+                </span>
+              </div>
+
+              {/* Absent Staff Table */}
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+                      {['Employee ID', 'Employee / Face', 'Department', 'Shift Check-In', 'Premises Exit Time', 'Duty Before Exit', 'Time Missing / Absent', 'Exit Camera / Gate', 'Actions'].map(h => (
+                        <th key={h} style={{ padding: '10px 14px', fontSize: '11px', fontWeight: '800', color: '#475569', whiteSpace: 'nowrap' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredAbsent.length === 0 ? (
+                      <tr>
+                        <td colSpan="9" style={{ padding: '36px', textAlign: 'center', color: '#64748b' }}>
+                          <div style={{ fontSize: '14px', fontWeight: '700', color: '#059669', marginBottom: '4px' }}>
+                            ✓ All Staff Are Currently Inside Premises
+                          </div>
+                          <div style={{ fontSize: '12px', color: '#94a3b8' }}>
+                            No active on-duty employees currently detected outside premises.
+                          </div>
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredAbsent.map((v, idx) => {
+                        const thumb = v.crops?.[0] || v.photo_b64 || null;
+                        const displayName = v.name || v.display_name || v.id;
+                        const isEnrolled = Boolean(v.is_enrolled);
+                        const missingMins = v.live_missing_mins || 1;
+                        const missingStr = v.live_missing_str || `${missingMins}m`;
+
+                        // Severity classification
+                        let badgeBg = '#fef3c7';
+                        let badgeColor = '#b45309';
+                        let severityLabel = 'Break / Away';
+                        if (missingMins >= 60) {
+                          badgeBg = '#fee2e2';
+                          badgeColor = '#b91c1c';
+                          severityLabel = 'Critical Absence';
+                        } else if (missingMins >= 30) {
+                          badgeBg = '#ffedd5';
+                          badgeColor = '#c2410c';
+                          severityLabel = 'Extended Absence';
+                        }
+
+                        return (
+                          <tr
+                            key={v.id}
+                            onClick={() => {
+                              if (onSelectEmployee) onSelectEmployee(v.id);
+                            }}
+                            style={{
+                              borderBottom: '1px solid #f1f5f9',
+                              backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fffaf5',
+                              cursor: 'pointer',
+                              transition: 'background-color 0.1s ease'
+                            }}
+                          >
+                            {/* Employee ID */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <span style={{
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: '11px',
+                                fontWeight: '700',
+                                color: '#0284c7'
+                              }}>
+                                {v.emp_code || v.id}
+                              </span>
+                            </td>
+
+                            {/* Employee Avatar & Name */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                <div style={{
+                                  width: '38px',
+                                  height: '38px',
+                                  borderRadius: '7px',
+                                  overflow: 'hidden',
+                                  border: '1.5px solid #fdba74',
+                                  backgroundColor: '#fff7ed',
+                                  flexShrink: 0,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center'
+                                }}>
+                                  {thumb ? (
+                                    <img
+                                      src={thumb.startsWith('data:') ? thumb : `data:image/jpeg;base64,${thumb}`}
+                                      alt={v.id}
+                                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                    />
+                                  ) : (
+                                    <span style={{ fontSize: '11px', fontWeight: '800', color: '#9a3412' }}>
+                                      {displayName.slice(0, 2).toUpperCase()}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{ fontWeight: isEnrolled ? '700' : '600', color: '#0f172a' }}>
+                                      {displayName}
+                                    </span>
+                                    <span style={{
+                                      fontSize: '9px',
+                                      fontWeight: '800',
+                                      padding: '1px 5px',
+                                      borderRadius: '4px',
+                                      backgroundColor: '#fee2e2',
+                                      color: '#dc2626',
+                                      border: '1px solid #fca5a5'
+                                    }}>
+                                      ● OUT
+                                    </span>
+                                  </div>
+                                  <div style={{ fontSize: '10px', color: '#64748b', marginTop: '1px' }}>
+                                    {v.designation || 'Staff Member'}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+
+                            {/* Department */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <span style={{
+                                padding: '3px 8px',
+                                borderRadius: '6px',
+                                fontSize: '11px',
+                                fontWeight: '700',
+                                backgroundColor: '#f1f5f9',
+                                color: '#334155'
+                              }}>
+                                {v.department || 'General Staff'}
+                              </span>
+                            </td>
+
+                            {/* Shift Check-In */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#0369a1', fontWeight: '700' }}>
+                                {fmtTime(v.today_check_in)}
+                              </div>
+                              <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                                Staff Inbound Entry
+                              </div>
+                            </td>
+
+                            {/* Premises Exit Time */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#b91c1c', fontWeight: '700' }}>
+                                {fmtTime(v.exit_time_iso || v.today_check_out || v.last_seen)}
+                              </div>
+                              <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                                Departed via Exit Gate
+                              </div>
+                            </td>
+
+                            {/* Duty Before Exit */}
+                            <td style={{ padding: '10px 14px', fontWeight: '700', color: '#0f172a', whiteSpace: 'nowrap' }}>
+                              {v.today_duration_str || `${v.today_duration_mins || 0}m on-site`}
+                            </td>
+
+                            {/* Time Missing / Absent Duration (Live) */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <div style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                padding: '4px 10px',
+                                borderRadius: '6px',
+                                backgroundColor: badgeBg,
+                                color: badgeColor,
+                                fontWeight: '800',
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: '12px',
+                                boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                              }}>
+                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: badgeColor }} />
+                                <span>{missingStr} missing</span>
+                              </div>
+                              <div style={{ fontSize: '10px', color: badgeColor, fontWeight: '700', marginTop: '2px' }}>
+                                {severityLabel}
+                              </div>
+                            </td>
+
+                            {/* Exit Camera / Gate */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <div style={{ fontSize: '11px', fontWeight: '700', color: '#334155' }}>
+                                {v.last_camera_name || v.camera_name || 'Staff Check-Out Exit'}
+                              </div>
+                              <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                                Gate 02 Departure
+                              </div>
+                            </td>
+
+                            {/* Actions */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (onSelectEmployee) onSelectEmployee(v.id);
+                                  }}
+                                  style={{
+                                    padding: '4px 10px',
+                                    borderRadius: '6px',
+                                    backgroundColor: '#fff7ed',
+                                    border: '1px solid #fdba74',
+                                    fontSize: '11px',
+                                    cursor: 'pointer',
+                                    color: '#c2410c',
+                                    fontWeight: '800',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                  }}
+                                  title="Inspect biometric photos and movement journey"
+                                >
+                                  View Journey ➔
+                                </button>
+                                <button
+                                  onClick={(e) => handleDeleteEmployee(v.id, v.name || v.id, e)}
+                                  style={{
+                                    padding: '4px 8px',
+                                    borderRadius: '6px',
+                                    backgroundColor: '#fff1f2',
+                                    border: '1px solid #fecdd3',
+                                    fontSize: '11px',
+                                    cursor: 'pointer',
+                                    color: '#e11d48',
+                                    fontWeight: '700',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '3px'
+                                  }}
+                                  title="Permanently delete profile and records"
+                                >
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                    <polyline points="3 6 5 6 21 6"></polyline>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                  </svg>
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* SUB-VIEW 2: EXTENDED BREAK & ABSENCE AUDIT LOG (>60 MINS) */}
+          {absentSubTab === 'extended_log' && (
+            <div>
+              {/* Executive Extended Absence Insight Banner */}
+              <div style={{
+                padding: '16px 20px',
+                backgroundColor: '#fef2f2',
+                borderBottom: '1px solid #fecdd3',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: '16px'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div style={{
+                    width: '42px',
+                    height: '42px',
+                    borderRadius: '10px',
+                    backgroundColor: '#fee2e2',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#b91c1c'
+                  }}>
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <h4 style={{ margin: 0, fontSize: '14px', fontWeight: '800', color: '#991b1b' }}>
+                      Extended Absence & Excessive Break Audit Log (&gt;60 mins Policy Limit)
+                    </h4>
+                    <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#b91c1c' }}>
+                      Permanent historical audit log of staff absent from premises for more than 60 minutes. Preserved even after employees return or complete their shift.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Quick Metrics for Extended Breaks */}
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #fca5a5', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#991b1b', textTransform: 'uppercase' }}>Total Breaches (&gt;60m)</div>
+                    <div style={{ fontSize: '15px', fontWeight: '900', color: '#b91c1c' }}>{extendedStats.total} Records</div>
+                  </div>
+                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #fca5a5', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#991b1b', textTransform: 'uppercase' }}>Still Outside</div>
+                    <div style={{ fontSize: '15px', fontWeight: '900', color: '#ea580c' }}>{extendedStats.away} Staff</div>
+                  </div>
+                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #86efac', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#166534', textTransform: 'uppercase' }}>Returned to Duty</div>
+                    <div style={{ fontSize: '15px', fontWeight: '900', color: '#15803d' }}>{extendedStats.returned} Staff</div>
+                  </div>
+                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #fca5a5', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#991b1b', textTransform: 'uppercase' }}>Max Overstay</div>
+                    <div style={{ fontSize: '15px', fontWeight: '900', color: '#dc2626' }}>+{extendedStats.maxOverstayStr}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Extended Absence Filter Bar */}
+              <div style={{ padding: '10px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', backgroundColor: '#fafbfc' }}>
+                {/* Search */}
+                <div style={{ position: 'relative' }}>
+                  <svg style={{ position: 'absolute', left: '9px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                  <input
+                    value={extendedSearch}
+                    onChange={e => setExtendedSearch(e.target.value)}
+                    placeholder="Search employee name, ID..."
+                    style={{ paddingLeft: '28px', paddingRight: '10px', paddingTop: '6px', paddingBottom: '6px', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', color: '#0f172a', outline: 'none', width: '220px' }}
+                  />
+                </div>
+
+                {/* Status Sub-Filter Pills */}
+                <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
+                  {[
+                    ['all', `All Logs (${extendedAbsences.length})`],
+                    ['away', `🔴 Still Outside (${extendedStats.away})`],
+                    ['returned', `✓ Returned (${extendedStats.returned})`]
+                  ].map(([id, label]) => (
+                    <button
+                      key={id}
+                      onClick={() => setExtendedStatusFilter(id)}
+                      style={{
+                        padding: '3px 10px',
+                        borderRadius: '5px',
+                        border: 'none',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        cursor: 'pointer',
+                        backgroundColor: extendedStatusFilter === id ? '#ffffff' : 'transparent',
+                        color: extendedStatusFilter === id ? '#b91c1c' : '#64748b',
+                        boxShadow: extendedStatusFilter === id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Department Dropdown */}
+                <select
+                  value={deptFilter}
+                  onChange={e => setDeptFilter(e.target.value)}
+                  style={{ padding: '6px 10px', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', color: '#334155', outline: 'none', cursor: 'pointer' }}
+                >
+                  <option value="all">All Departments</option>
+                  {Object.entries(deptCounts).sort((a, b) => b[1] - a[1]).map(([d, c]) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+
+                <span style={{ marginLeft: 'auto', fontSize: '11px', color: '#64748b', fontWeight: '600' }}>
+                  Policy: <strong>Max 60m / Break</strong> · Shift Date: <strong>{ledgerDate}</strong>
+                </span>
+              </div>
+
+              {/* Extended Absence Log Table */}
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+                      {['Employee ID', 'Employee / Face', 'Department', 'Departed Time (Exit Gate)', 'Returned Time (Entry Gate)', 'Total Away Duration', 'Allowed Policy', 'Overstay Exceeded', 'Status', 'Actions'].map(h => (
+                        <th key={h} style={{ padding: '10px 14px', fontSize: '11px', fontWeight: '800', color: '#475569', whiteSpace: 'nowrap' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredExtended.length === 0 ? (
+                      <tr>
+                        <td colSpan="10" style={{ padding: '36px', textAlign: 'center', color: '#64748b' }}>
+                          <div style={{ fontSize: '14px', fontWeight: '700', color: '#059669', marginBottom: '4px' }}>
+                            ✓ No Extended Absences (&gt;60m) Recorded for This Shift
+                          </div>
+                          <div style={{ fontSize: '12px', color: '#94a3b8' }}>
+                            All employee breaks during this shift were within the standard 60-minute policy window.
+                          </div>
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredExtended.map((item, idx) => {
+                        const matchedVis = visitors.find(v => v.id === item.employee_id);
+                        const thumb = item.photo_b64 || matchedVis?.crops?.[0] || matchedVis?.photo_b64 || null;
+                        const isAway = item.status === 'Currently Away';
+                        const durStr = item.duration_str || `${item.duration_minutes || 0}m`;
+                        const overstayMins = item.overstay_minutes || Math.max(0, (item.duration_minutes || 0) - 60);
+                        const overstayStr = item.overstay_str || `+${overstayMins}m`;
+
+                        return (
+                          <tr
+                            key={item.break_id || `${item.employee_id}-${idx}`}
+                            onClick={() => {
+                              if (onSelectEmployee) onSelectEmployee(item.employee_id);
+                            }}
+                            style={{
+                              borderBottom: '1px solid #f1f5f9',
+                              backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fffaf5',
+                              cursor: 'pointer',
+                              transition: 'background-color 0.1s ease'
+                            }}
+                          >
+                            {/* Employee ID */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <span style={{
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: '11px',
+                                fontWeight: '700',
+                                color: '#0284c7'
+                              }}>
+                                {item.employee_id}
+                              </span>
+                            </td>
+
+                            {/* Employee Avatar & Name */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                <div style={{
+                                  width: '38px',
+                                  height: '38px',
+                                  borderRadius: '7px',
+                                  overflow: 'hidden',
+                                  border: isAway ? '1.5px solid #ef4444' : '1.5px solid #cbd5e1',
+                                  backgroundColor: '#fff7ed',
+                                  flexShrink: 0,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center'
+                                }}>
+                                  {thumb ? (
+                                    <img
+                                      src={thumb.startsWith('data:') ? thumb : `data:image/jpeg;base64,${thumb}`}
+                                      alt={item.employee_id}
+                                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                    />
+                                  ) : (
+                                    <span style={{ fontSize: '11px', fontWeight: '800', color: '#9a3412' }}>
+                                      {(item.name || item.employee_id).slice(0, 2).toUpperCase()}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{ fontWeight: '700', color: '#0f172a' }}>
+                                      {item.name || item.employee_id}
+                                    </span>
+                                    {isAway ? (
+                                      <span style={{
+                                        fontSize: '9px',
+                                        fontWeight: '800',
+                                        padding: '1px 5px',
+                                        borderRadius: '4px',
+                                        backgroundColor: '#fee2e2',
+                                        color: '#dc2626',
+                                        border: '1px solid #fca5a5'
+                                      }}>
+                                        ● AWAY NOW
+                                      </span>
+                                    ) : (
+                                      <span style={{
+                                        fontSize: '9px',
+                                        fontWeight: '800',
+                                        padding: '1px 5px',
+                                        borderRadius: '4px',
+                                        backgroundColor: '#dcfce7',
+                                        color: '#15803d',
+                                        border: '1px solid #86efac'
+                                      }}>
+                                        ✓ RETURNED
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div style={{ fontSize: '10px', color: '#64748b', marginTop: '1px' }}>
+                                    {item.designation || 'Staff Member'}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+
+                            {/* Department */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <span style={{
+                                padding: '3px 8px',
+                                borderRadius: '6px',
+                                fontSize: '11px',
+                                fontWeight: '700',
+                                backgroundColor: '#f1f5f9',
+                                color: '#334155'
+                              }}>
+                                {item.department || 'General Staff'}
+                              </span>
+                            </td>
+
+                            {/* Departed Time (Exit Gate) */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#b91c1c', fontWeight: '700' }}>
+                                {item.exit_display || fmtTime(item.exit_time)}
+                              </div>
+                              <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                                {item.exit_camera_name || 'Exit Gate'}
+                              </div>
+                            </td>
+
+                            {/* Returned Time (Entry Gate) */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              {isAway ? (
+                                <div>
+                                  <span style={{
+                                    fontFamily: 'var(--font-mono)',
+                                    fontSize: '11px',
+                                    fontWeight: '800',
+                                    color: '#ea580c',
+                                    backgroundColor: '#fff7ed',
+                                    padding: '2px 8px',
+                                    borderRadius: '5px',
+                                    border: '1px solid #fed7aa'
+                                  }}>
+                                    🔴 Still Outside
+                                  </span>
+                                  <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '2px' }}>
+                                    Has not entered yet
+                                  </div>
+                                </div>
+                              ) : (
+                                <div>
+                                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#166534', fontWeight: '700' }}>
+                                    {item.entry_display || fmtTime(item.entry_time)}
+                                  </div>
+                                  <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                                    {item.entry_camera_name || 'Entry Gate'}
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+
+                            {/* Total Away Duration */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <div style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                padding: '4px 10px',
+                                borderRadius: '6px',
+                                backgroundColor: '#fee2e2',
+                                color: '#b91c1c',
+                                fontWeight: '800',
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: '12px'
+                              }}>
+                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#dc2626' }} />
+                                <span>{durStr}</span>
+                              </div>
+                            </td>
+
+                            {/* Allowed Policy */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <span style={{
+                                padding: '3px 8px',
+                                borderRadius: '5px',
+                                fontSize: '11px',
+                                fontWeight: '700',
+                                backgroundColor: '#f1f5f9',
+                                color: '#475569'
+                              }}>
+                                60m (1h Lunch)
+                              </span>
+                            </td>
+
+                            {/* Overstay Exceeded */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <span style={{
+                                padding: '3px 9px',
+                                borderRadius: '6px',
+                                fontSize: '11px',
+                                fontWeight: '800',
+                                backgroundColor: '#fef2f2',
+                                color: '#dc2626',
+                                border: '1px solid #fca5a5',
+                                fontFamily: 'var(--font-mono)'
+                              }}>
+                                {overstayStr} overstay
+                              </span>
+                            </td>
+
+                            {/* Status */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              {isAway ? (
+                                <span style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '5px',
+                                  padding: '3px 8px',
+                                  borderRadius: '6px',
+                                  fontSize: '11px',
+                                  fontWeight: '800',
+                                  backgroundColor: '#fff7ed',
+                                  color: '#c2410c',
+                                  border: '1px solid #fed7aa'
+                                }}>
+                                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#ea580c' }} />
+                                  Currently Away
+                                </span>
+                              ) : (
+                                <span style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '5px',
+                                  padding: '3px 8px',
+                                  borderRadius: '6px',
+                                  fontSize: '11px',
+                                  fontWeight: '800',
+                                  backgroundColor: '#f0fdf4',
+                                  color: '#166534',
+                                  border: '1px solid #bbf7d0'
+                                }}>
+                                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#16a34a' }} />
+                                  Returned
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Actions */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (onSelectEmployee) onSelectEmployee(item.employee_id);
+                                }}
+                                style={{
+                                  padding: '4px 10px',
+                                  borderRadius: '6px',
+                                  backgroundColor: '#fee2e2',
+                                  border: '1px solid #fca5a5',
+                                  fontSize: '11px',
+                                  cursor: 'pointer',
+                                  color: '#991b1b',
+                                  fontWeight: '800',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px'
+                                }}
+                                title="Inspect biometric timeline and sighting journey"
+                              >
+                                View Journey ➔
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -2236,6 +3686,746 @@ export default function EmployeeRegistry({
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 1: SINGLE EMPLOYEE MANUAL ATTENDANCE OVERRIDE                       */}
+      {/* ========================================================================= */}
+      {singleOverrideOpen && overrideEmp && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(15, 23, 42, 0.65)',
+          backdropFilter: 'blur(3px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: '16px'
+        }}>
+          <div style={{
+            backgroundColor: '#ffffff',
+            borderRadius: '16px',
+            width: '100%',
+            maxWidth: '520px',
+            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+            border: '1px solid #e2e8f0',
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column'
+          }}>
+            {/* Header */}
+            <div style={{
+              padding: '18px 24px',
+              backgroundColor: overrideAction === 'check_out' ? '#fff7ed' : '#ecfdf5',
+              borderBottom: overrideAction === 'check_out' ? '1px solid #fdba74' : '1px solid #a7f3d0',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between'
+            }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '18px' }}>{overrideAction === 'check_out' ? '🚪' : '🟢'}</span>
+                  <h3 style={{
+                    margin: 0,
+                    fontSize: '17px',
+                    fontWeight: '800',
+                    color: overrideAction === 'check_out' ? '#9a3412' : '#065f46'
+                  }}>
+                    Manual Attendance Override
+                  </h3>
+                  <span style={{
+                    padding: '2px 8px',
+                    borderRadius: '12px',
+                    fontSize: '10px',
+                    fontWeight: '800',
+                    backgroundColor: '#fff',
+                    border: '1px solid #cbd5e1',
+                    color: '#475569'
+                  }}>
+                    Option 1: Admin Badge
+                  </span>
+                </div>
+                <div style={{ fontSize: '13px', color: '#64748b', marginTop: '4px' }}>
+                  Target Staff: <strong style={{ color: '#0f172a' }}>{overrideEmp.name || overrideEmp.displayName || overrideEmp.employee_id || overrideEmp.id}</strong>
+                  {' '}({overrideEmp.employee_id || overrideEmp.id})
+                  {overrideEmp.department && <span style={{ color: '#94a3b8' }}> • {overrideEmp.department}</span>}
+                </div>
+              </div>
+              <button
+                onClick={() => setSingleOverrideOpen(false)}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  fontSize: '20px',
+                  fontWeight: '700',
+                  color: '#64748b',
+                  cursor: 'pointer',
+                  padding: '4px 8px'
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Body */}
+            <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              {/* Notice Banner */}
+              {overrideNotice && (
+                <div style={{
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  fontSize: '13px',
+                  fontWeight: '600',
+                  backgroundColor: overrideNotice.ok ? '#f0fdf4' : '#fff1f2',
+                  border: overrideNotice.ok ? '1px solid #86efac' : '1px solid #fecdd3',
+                  color: overrideNotice.ok ? '#166534' : '#991b1b'
+                }}>
+                  {overrideNotice.msg}
+                </div>
+              )}
+
+              {/* Action Selector: Check In vs Check Out */}
+              <div>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: '800', color: '#334155', marginBottom: '6px', textTransform: 'uppercase' }}>
+                  Select Action
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setOverrideAction('check_in')}
+                    style={{
+                      padding: '10px 14px',
+                      borderRadius: '8px',
+                      border: overrideAction === 'check_in' ? '2px solid #10b981' : '1px solid #e2e8f0',
+                      backgroundColor: overrideAction === 'check_in' ? '#ecfdf5' : '#ffffff',
+                      color: overrideAction === 'check_in' ? '#047857' : '#64748b',
+                      fontWeight: '800',
+                      fontSize: '13px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    🟢 Mark Check-In (Arrival)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOverrideAction('check_out')}
+                    style={{
+                      padding: '10px 14px',
+                      borderRadius: '8px',
+                      border: overrideAction === 'check_out' ? '2px solid #ea580c' : '1px solid #e2e8f0',
+                      backgroundColor: overrideAction === 'check_out' ? '#fff7ed' : '#ffffff',
+                      color: overrideAction === 'check_out' ? '#c2410c' : '#64748b',
+                      fontWeight: '800',
+                      fontSize: '13px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    🚪 Mark Check-Out (Exit)
+                  </button>
+                </div>
+              </div>
+
+              {/* Date & Time Selectors */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: '800', color: '#334155', marginBottom: '6px', textTransform: 'uppercase' }}>
+                    Attendance Date
+                  </label>
+                  <input
+                    type="date"
+                    value={overrideDate}
+                    onChange={e => setOverrideDate(e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '9px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid #cbd5e1',
+                      fontSize: '13px',
+                      fontWeight: '600',
+                      color: '#0f172a',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: '800', color: '#334155', marginBottom: '6px', textTransform: 'uppercase' }}>
+                    Action Time (HH:MM)
+                  </label>
+                  <input
+                    type="time"
+                    value={overrideTime}
+                    onChange={e => setOverrideTime(e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '9px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid #cbd5e1',
+                      fontSize: '13px',
+                      fontWeight: '700',
+                      color: '#0f172a',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Quick Preset Buttons */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#64748b', marginBottom: '5px' }}>
+                  Quick Time Presets:
+                </label>
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  {['09:00', '13:00', '14:00', '17:00', '18:00', '19:00'].map(t => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setOverrideTime(t)}
+                      style={{
+                        padding: '4px 8px',
+                        borderRadius: '6px',
+                        border: '1px solid #e2e8f0',
+                        backgroundColor: overrideTime === t ? '#eff6ff' : '#f8fafc',
+                        color: overrideTime === t ? '#1d4ed8' : '#475569',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = new Date();
+                      setOverrideTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+                    }}
+                    style={{
+                      padding: '4px 8px',
+                      borderRadius: '6px',
+                      border: '1px solid #cbd5e1',
+                      backgroundColor: '#ffffff',
+                      color: '#0f172a',
+                      fontSize: '11px',
+                      fontWeight: '700',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    ⏱ Now
+                  </button>
+                </div>
+              </div>
+
+              {/* Reason / Audit Note */}
+              <div>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: '800', color: '#334155', marginBottom: '6px', textTransform: 'uppercase' }}>
+                  Override Reason & Audit Note
+                </label>
+                <input
+                  type="text"
+                  value={overrideReason}
+                  onChange={e => setOverrideReason(e.target.value)}
+                  placeholder="e.g. Shift End Regular Check-Out, Permission Slip, Admin Correction"
+                  style={{
+                    width: '100%',
+                    padding: '9px 12px',
+                    borderRadius: '8px',
+                    border: '1px solid #cbd5e1',
+                    fontSize: '13px',
+                    color: '#0f172a',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+
+              {/* Info Note */}
+              <div style={{
+                backgroundColor: '#f8fafc',
+                border: '1px solid #e2e8f0',
+                borderRadius: '8px',
+                padding: '10px 12px',
+                fontSize: '12px',
+                color: '#475569',
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: '8px'
+              }}>
+                <span style={{ fontSize: '14px' }}>ℹ️</span>
+                <div>
+                  <strong>Audit Trail Integrity:</strong> Manual overrides are permanently badged as <code style={{ backgroundColor: '#e2e8f0', padding: '1px 4px', borderRadius: '4px' }}>📝 Admin Override</code>. This recalculates total working duration, breaks, and productivity score automatically.
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div style={{
+              padding: '14px 24px',
+              backgroundColor: '#f8fafc',
+              borderTop: '1px solid #e2e8f0',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'flex-end',
+              gap: '10px'
+            }}>
+              <button
+                type="button"
+                onClick={() => setSingleOverrideOpen(false)}
+                disabled={overrideLoading}
+                style={{
+                  padding: '9px 16px',
+                  borderRadius: '8px',
+                  border: '1px solid #cbd5e1',
+                  backgroundColor: '#ffffff',
+                  color: '#475569',
+                  fontWeight: '700',
+                  fontSize: '13px',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSingleOverrideSubmit}
+                disabled={overrideLoading}
+                style={{
+                  padding: '9px 20px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  backgroundColor: overrideAction === 'check_out' ? '#ea580c' : '#10b981',
+                  color: '#ffffff',
+                  fontWeight: '800',
+                  fontSize: '13px',
+                  cursor: overrideLoading ? 'not-allowed' : 'pointer',
+                  opacity: overrideLoading ? 0.7 : 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                }}
+              >
+                {overrideLoading ? 'Applying...' : (overrideAction === 'check_out' ? 'Confirm Check-Out' : 'Confirm Check-In')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 2: BULK SHIFT CHECK-OUT (E.G., 5:00 PM SHIFT CONCLUSION)             */}
+      {/* ========================================================================= */}
+      {bulkOpen && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(15, 23, 42, 0.65)',
+          backdropFilter: 'blur(3px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: '16px'
+        }}>
+          <div style={{
+            backgroundColor: '#ffffff',
+            borderRadius: '16px',
+            width: '100%',
+            maxWidth: '680px',
+            maxHeight: '90vh',
+            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+            border: '1px solid #e2e8f0',
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column'
+          }}>
+            {/* Header */}
+            <div style={{
+              padding: '18px 24px',
+              backgroundColor: '#fff7ed',
+              borderBottom: '1px solid #fdba74',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between'
+            }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '18px' }}>🚪</span>
+                  <h3 style={{ margin: 0, fontSize: '17px', fontWeight: '800', color: '#9a3412' }}>
+                    Shift End Bulk Check-Out
+                  </h3>
+                  <span style={{
+                    padding: '2px 8px',
+                    borderRadius: '12px',
+                    fontSize: '10px',
+                    fontWeight: '800',
+                    backgroundColor: '#fff',
+                    border: '1px solid #fed7aa',
+                    color: '#c2410c'
+                  }}>
+                    Batch Departure
+                  </span>
+                </div>
+                <div style={{ fontSize: '12px', color: '#64748b', marginTop: '3px' }}>
+                  Check out multiple staff at shift conclusion in one click (e.g. at 5:00 PM). Automatically completes duty hours & productivity scores.
+                </div>
+              </div>
+              <button
+                onClick={() => setBulkOpen(false)}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  fontSize: '20px',
+                  fontWeight: '700',
+                  color: '#64748b',
+                  cursor: 'pointer',
+                  padding: '4px 8px'
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Body */}
+            <div style={{ padding: '20px 24px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              {/* Notice Banner */}
+              {bulkNotice && (
+                <div style={{
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  fontSize: '13px',
+                  fontWeight: '600',
+                  backgroundColor: bulkNotice.ok ? '#f0fdf4' : '#fff1f2',
+                  border: bulkNotice.ok ? '1px solid #86efac' : '1px solid #fecdd3',
+                  color: bulkNotice.ok ? '#166534' : '#991b1b'
+                }}>
+                  {bulkNotice.msg}
+                </div>
+              )}
+
+              {/* Time & Date Configuration */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: '800', color: '#334155', marginBottom: '6px', textTransform: 'uppercase' }}>
+                    Shift Departure Date
+                  </label>
+                  <input
+                    type="date"
+                    value={bulkDate}
+                    onChange={e => setBulkDate(e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '9px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid #cbd5e1',
+                      fontSize: '13px',
+                      fontWeight: '600',
+                      color: '#0f172a',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: '800', color: '#334155', marginBottom: '6px', textTransform: 'uppercase' }}>
+                    Check-Out Time (e.g., 17:00)
+                  </label>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <input
+                      type="time"
+                      value={bulkTime}
+                      onChange={e => setBulkTime(e.target.value)}
+                      style={{
+                        flex: 1,
+                        padding: '9px 12px',
+                        borderRadius: '8px',
+                        border: '1px solid #cbd5e1',
+                        fontSize: '13px',
+                        fontWeight: '700',
+                        color: '#0f172a',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setBulkTime('17:00')}
+                      style={{
+                        padding: '0 10px',
+                        borderRadius: '8px',
+                        border: '1px solid #fdba74',
+                        backgroundColor: '#fff7ed',
+                        color: '#c2410c',
+                        fontSize: '11px',
+                        fontWeight: '800',
+                        cursor: 'pointer'
+                      }}
+                      title="Set to 5:00 PM standard shift end"
+                    >
+                      5 PM
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const d = new Date();
+                        setBulkTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+                      }}
+                      style={{
+                        padding: '0 10px',
+                        borderRadius: '8px',
+                        border: '1px solid #cbd5e1',
+                        backgroundColor: '#ffffff',
+                        color: '#475569',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        cursor: 'pointer'
+                      }}
+                      title="Current Clock Time"
+                    >
+                      Now
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Reason / Audit Note */}
+              <div>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: '800', color: '#334155', marginBottom: '6px', textTransform: 'uppercase' }}>
+                  Shift Note / Reason
+                </label>
+                <input
+                  type="text"
+                  value={bulkReason}
+                  onChange={e => setBulkReason(e.target.value)}
+                  placeholder="e.g. Regular Shift 09:00 - 17:00 End Check-Out"
+                  style={{
+                    width: '100%',
+                    padding: '9px 12px',
+                    borderRadius: '8px',
+                    border: '1px solid #cbd5e1',
+                    fontSize: '13px',
+                    color: '#0f172a',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+
+              {/* Staff Selection Area */}
+              <div>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginBottom: '8px'
+                }}>
+                  <label style={{ fontSize: '12px', fontWeight: '800', color: '#334155', textTransform: 'uppercase' }}>
+                    Select Staff to Check Out ({bulkSelectedIds.size} Selected)
+                  </label>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const onDutyIds = (ledgerData?.employees || []).filter(e => e.status === 'On Duty').map(e => e.employee_id);
+                        setBulkSelectedIds(new Set(onDutyIds));
+                      }}
+                      style={{
+                        padding: '3px 8px',
+                        borderRadius: '6px',
+                        border: '1px solid #fed7aa',
+                        backgroundColor: '#fff7ed',
+                        color: '#c2410c',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Select All On Duty ({ (ledgerData?.employees || []).filter(e => e.status === 'On Duty').length })
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const allIds = (ledgerData?.employees || []).map(e => e.employee_id);
+                        setBulkSelectedIds(new Set(allIds));
+                      }}
+                      style={{
+                        padding: '3px 8px',
+                        borderRadius: '6px',
+                        border: '1px solid #e2e8f0',
+                        backgroundColor: '#f8fafc',
+                        color: '#475569',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Select All ({ (ledgerData?.employees || []).length })
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBulkSelectedIds(new Set())}
+                      style={{
+                        padding: '3px 8px',
+                        borderRadius: '6px',
+                        border: '1px solid #e2e8f0',
+                        backgroundColor: '#ffffff',
+                        color: '#64748b',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Deselect All
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{
+                  border: '1px solid #e2e8f0',
+                  borderRadius: '10px',
+                  maxHeight: '230px',
+                  overflowY: 'auto',
+                  backgroundColor: '#ffffff'
+                }}>
+                  {(!ledgerData?.employees || ledgerData.employees.length === 0) ? (
+                    <div style={{ padding: '24px', textAlign: 'center', color: '#94a3b8', fontSize: '13px' }}>
+                      No staff members found for the selected date.
+                    </div>
+                  ) : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                      <thead>
+                        <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#64748b', textAlign: 'left' }}>
+                          <th style={{ padding: '8px 12px', width: '32px' }}></th>
+                          <th style={{ padding: '8px 12px' }}>Employee</th>
+                          <th style={{ padding: '8px 12px' }}>Department</th>
+                          <th style={{ padding: '8px 12px' }}>Current Status</th>
+                          <th style={{ padding: '8px 12px' }}>First In</th>
+                          <th style={{ padding: '8px 12px' }}>Working Time</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ledgerData.employees.map(emp => {
+                          const isSelected = bulkSelectedIds.has(emp.employee_id);
+                          const isOnDuty = emp.status === 'On Duty';
+                          return (
+                            <tr
+                              key={emp.employee_id}
+                              onClick={() => {
+                                const next = new Set(bulkSelectedIds);
+                                if (next.has(emp.employee_id)) next.delete(emp.employee_id);
+                                else next.add(emp.employee_id);
+                                setBulkSelectedIds(next);
+                              }}
+                              style={{
+                                borderBottom: '1px solid #f1f5f9',
+                                cursor: 'pointer',
+                                backgroundColor: isSelected ? '#fff7ed' : 'transparent',
+                                transition: 'background-color 0.15s'
+                              }}
+                            >
+                              <td style={{ padding: '8px 12px', textAlign: 'center' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => {}} // handled by row click
+                                  style={{ cursor: 'pointer' }}
+                                />
+                              </td>
+                              <td style={{ padding: '8px 12px', fontWeight: '700', color: '#0f172a' }}>
+                                {emp.name}
+                                <div style={{ fontSize: '10px', color: '#64748b', fontFamily: 'monospace' }}>{emp.employee_id}</div>
+                              </td>
+                              <td style={{ padding: '8px 12px', color: '#475569' }}>
+                                {emp.department || 'General'}
+                              </td>
+                              <td style={{ padding: '8px 12px' }}>
+                                <span style={{
+                                  padding: '2px 8px',
+                                  borderRadius: '12px',
+                                  fontSize: '11px',
+                                  fontWeight: '700',
+                                  backgroundColor: isOnDuty ? '#ecfdf5' : (emp.status === 'Checked Out' ? '#f1f5f9' : '#fff1f2'),
+                                  color: isOnDuty ? '#047857' : (emp.status === 'Checked Out' ? '#475569' : '#991b1b')
+                                }}>
+                                  {emp.status}
+                                </span>
+                              </td>
+                              <td style={{ padding: '8px 12px', color: '#0f172a', fontWeight: '600' }}>
+                                {emp.first_in ? emp.first_in.slice(11, 16) : '—'}
+                              </td>
+                              <td style={{ padding: '8px 12px', color: '#047857', fontWeight: '700' }}>
+                                {emp.working_str || '—'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div style={{
+              padding: '14px 24px',
+              backgroundColor: '#f8fafc',
+              borderTop: '1px solid #e2e8f0',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between'
+            }}>
+              <div style={{ fontSize: '12px', color: '#64748b' }}>
+                Will apply departure at <strong style={{ color: '#c2410c' }}>{bulkTime}</strong> for <strong style={{ color: '#0f172a' }}>{bulkSelectedIds.size} staff member(s)</strong>.
+              </div>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => setBulkOpen(false)}
+                  disabled={bulkLoading}
+                  style={{
+                    padding: '9px 16px',
+                    borderRadius: '8px',
+                    border: '1px solid #cbd5e1',
+                    backgroundColor: '#ffffff',
+                    color: '#475569',
+                    fontWeight: '700',
+                    fontSize: '13px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleBulkCheckoutSubmit}
+                  disabled={bulkLoading || bulkSelectedIds.size === 0}
+                  style={{
+                    padding: '9px 20px',
+                    borderRadius: '8px',
+                    border: 'none',
+                    backgroundColor: bulkSelectedIds.size === 0 ? '#cbd5e1' : '#ea580c',
+                    color: '#ffffff',
+                    fontWeight: '800',
+                    fontSize: '13px',
+                    cursor: (bulkLoading || bulkSelectedIds.size === 0) ? 'not-allowed' : 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                  }}
+                >
+                  {bulkLoading ? 'Processing Bulk Check-Out...' : `Apply Bulk Check-Out (${bulkSelectedIds.size})`}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

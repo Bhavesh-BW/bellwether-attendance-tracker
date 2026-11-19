@@ -78,6 +78,62 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
   const [previewImg, setPreviewImg] = useState(null);
   const [expandedDays, setExpandedDays] = useState(() => ({ [getTodayDateStr()]: true }));
 
+  // Manual Attendance Override state
+  const [manualModalOpen, setManualModalOpen] = useState(false);
+  const [manualAction, setManualAction] = useState('check_out');
+  const [manualTime, setManualTime] = useState(() => {
+    const d = new Date();
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  });
+  const [manualReason, setManualReason] = useState('Admin Manual Override');
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualNotice, setManualNotice] = useState(null);
+
+  const reloadJourney = () => {
+    if (!visitorId) return;
+    fetch(`/api/employees/journey?employee_id=${encodeURIComponent(visitorId)}&visitor_id=${encodeURIComponent(visitorId)}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+        return res.json();
+      })
+      .then((data) => setJourney(data))
+      .catch((err) => console.error(err));
+  };
+
+  const handleManualAttendance = async () => {
+    setManualLoading(true);
+    setManualNotice(null);
+    try {
+      const today = getTodayDateStr();
+      const timestamp = `${today}T${manualTime}:00`;
+      const res = await fetch('/api/attendance/manual-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: visitorId,
+          action: manualAction,
+          timestamp,
+          date: today,
+          reason: manualReason
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to apply manual override');
+      }
+      setManualNotice({ ok: true, msg: `Manual ${manualAction === 'check_out' ? 'Check-Out' : 'Check-In'} applied!` });
+      setTimeout(() => {
+        setManualModalOpen(false);
+        setManualNotice(null);
+      }, 1000);
+      reloadJourney();
+    } catch (err) {
+      setManualNotice({ ok: false, msg: err.message });
+    } finally {
+      setManualLoading(false);
+    }
+  };
+
   useEffect(() => {
     const today = getTodayDateStr();
     setExpandedDays(prev => ({
@@ -408,27 +464,56 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
             </div>
           </div>
 
-          <button
-            onClick={onClose}
-            style={{
-              background: '#f1f5f9',
-              border: '1px solid #e2e8f0',
-              cursor: 'pointer',
-              color: '#64748b',
-              padding: '8px',
-              borderRadius: '8px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              transition: 'background 0.15s'
-            }}
-            title="Close dialog"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {isEnrolled && (
+              <button
+                type="button"
+                onClick={() => {
+                  const isOut = journey?.today_status === 'CHECKED OUT' || journey?.today_attendance?.status === 'Checked Out';
+                  setManualAction(isOut ? 'check_in' : 'check_out');
+                  setManualModalOpen(true);
+                }}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '7px 14px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  backgroundColor: (journey?.today_status === 'CHECKED OUT' || journey?.today_attendance?.status === 'Checked Out') ? '#059669' : '#ea580c',
+                  color: '#ffffff',
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  cursor: 'pointer',
+                  boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                }}
+              >
+                {(journey?.today_status === 'CHECKED OUT' || journey?.today_attendance?.status === 'Checked Out') ? '🟢 Manual Check-In' : '🚪 Manual Check-Out'}
+              </button>
+            )}
+
+            <button
+              onClick={onClose}
+              style={{
+                background: '#f1f5f9',
+                border: '1px solid #e2e8f0',
+                cursor: 'pointer',
+                color: '#64748b',
+                padding: '8px',
+                borderRadius: '8px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'background 0.15s'
+              }}
+              title="Close dialog"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Biometric Verification Gallery (Face + Body Captured Images) */}
@@ -738,134 +823,213 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
                       <th style={{ padding: '10px 14px', fontWeight: '800' }}>Date</th>
                       <th style={{ padding: '10px 14px', fontWeight: '800' }}>First Check-In (Entry)</th>
                       <th style={{ padding: '10px 14px', fontWeight: '800' }}>Final Check-Out (Exit)</th>
-                      <th style={{ padding: '10px 14px', fontWeight: '800' }}>Premises Duration</th>
-                      <th style={{ padding: '10px 14px', fontWeight: '800' }}>In & Out Count</th>
+                      <th style={{ padding: '10px 14px', fontWeight: '800' }}>Working Time</th>
+                      <th style={{ padding: '10px 14px', fontWeight: '800' }}>Break Time</th>
+                      <th style={{ padding: '10px 14px', fontWeight: '800' }}>Productivity</th>
+                      <th style={{ padding: '10px 14px', fontWeight: '800' }}>Passages</th>
                       <th style={{ padding: '10px 14px', fontWeight: '800' }}>Status</th>
-                      <th style={{ padding: '10px 14px', fontWeight: '800' }}>Journey Track</th>
+                      <th style={{ padding: '10px 14px', fontWeight: '800' }}>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredDailyHistory.length === 0 ? (
                       <tr>
-                        <td colSpan="7" style={{ padding: '32px', textAlign: 'center', color: '#94a3b8' }}>
+                        <td colSpan="9" style={{ padding: '32px', textAlign: 'center', color: '#94a3b8' }}>
                           No attendance records found for {dateRange.label}.
                         </td>
                       </tr>
                     ) : (
-                      filteredDailyHistory.map((rec, idx) => (
-                        <tr
-                          key={idx}
-                          style={{
-                            borderBottom: '1px solid #f1f5f9',
-                            backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fafbfc'
-                          }}
-                        >
-                          <td style={{ padding: '10px 14px', fontWeight: '700', color: '#0f172a' }}>
-                            {rec.formatted_date || rec.date}
-                          </td>
-                          <td style={{ padding: '10px 14px' }}>
-                            <div style={{ fontFamily: 'var(--font-mono)', fontWeight: '700', color: '#0369a1' }}>
-                              {rec.check_in_display || formatTimeIST(rec.check_in_time)}
-                            </div>
-                            <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                              {rec.check_in_camera || 'Staff Inbound Entry'}
-                            </div>
-                          </td>
-                          <td style={{ padding: '10px 14px' }}>
-                            <div style={{
-                              fontFamily: 'var(--font-mono)',
-                              fontWeight: '700',
-                              color: rec.is_checkout_verified ? '#15803d' : '#b45309'
-                            }}>
-                              {rec.is_checkout_verified ? (rec.check_out_display || formatTimeIST(rec.check_out_time)) : '● On Duty'}
-                            </div>
-                            <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                              {rec.is_checkout_verified ? (rec.check_out_camera || 'Staff Check-Out Exit') : 'Shift Ongoing'}
-                            </div>
-                          </td>
-                          <td style={{ padding: '10px 14px', fontWeight: '700', color: '#0f172a' }}>
-                            {rec.duration_str || `${rec.duration_minutes}m`}
-                          </td>
-                          <td style={{ padding: '10px 14px' }}>
-                            <span style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: '6px',
-                              padding: '2px 8px',
-                              borderRadius: '6px',
-                              backgroundColor: '#f1f5f9',
-                              fontFamily: 'var(--font-mono)',
-                              fontSize: '11px',
-                              fontWeight: '700'
-                            }}>
-                              {(() => {
-                                const dayCps = allCheckpoints.filter(c => c.timestamp && c.timestamp.startsWith(rec.date));
-                                const cIns = dayCps.filter(c => c.event_type === 'IN').length;
-                                const cOuts = dayCps.filter(c => c.event_type === 'OUT').length;
-                                const inVal = Math.max(rec.in_count ?? 1, cIns || 1);
-                                const outVal = Math.max(rec.out_count ?? (rec.is_checkout_verified ? 1 : 0), cOuts);
-                                return (
-                                  <>
-                                    <span style={{ color: '#15803d' }}>{inVal} In</span>
-                                    <span style={{ color: '#94a3b8' }}>/</span>
-                                    <span style={{ color: '#b45309' }}>{outVal} Out</span>
-                                  </>
-                                );
-                              })()}
-                            </span>
-                          </td>
-                          <td style={{ padding: '10px 14px' }}>
-                            {rec.is_checkout_verified ? (
-                              <span style={{
-                                padding: '3px 8px',
-                                borderRadius: '9999px',
-                                backgroundColor: '#ecfdf5',
-                                color: '#047857',
+                      filteredDailyHistory.map((rec, idx) => {
+                        const isManualIn = Boolean(rec.is_check_in_manual || (rec.check_in_camera && String(rec.check_in_camera).startsWith('manual')));
+                        const isManualOut = Boolean(rec.is_check_out_manual || (rec.check_out_camera && String(rec.check_out_camera).startsWith('manual')));
+                        const prod = typeof rec.productivity_pct === 'number' ? rec.productivity_pct : 100.0;
+                        const prodColor = prod >= 85 ? '#059669' : (prod >= 70 ? '#d97706' : '#dc2626');
+                        const prodBg = prod >= 85 ? '#ecfdf5' : (prod >= 70 ? '#fffbeb' : '#fef2f2');
+                        const isToday = rec.date === getTodayDateStr();
+
+                        return (
+                          <tr
+                            key={idx}
+                            style={{
+                              borderBottom: '1px solid #f1f5f9',
+                              backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fafbfc'
+                            }}
+                          >
+                            <td style={{ padding: '10px 14px', fontWeight: '700', color: '#0f172a', whiteSpace: 'nowrap' }}>
+                              {rec.formatted_date || rec.date}
+                            </td>
+                            <td style={{ padding: '10px 14px' }}>
+                              <div style={{ fontFamily: 'var(--font-mono)', fontWeight: '700', color: '#0369a1' }}>
+                                {rec.check_in_display || formatTimeIST(rec.check_in_time)}
+                              </div>
+                              <div style={{ fontSize: '10px', marginTop: '2px' }}>
+                                {isManualIn ? (
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', padding: '1px 5px', borderRadius: '4px', backgroundColor: '#eff6ff', color: '#1d4ed8', fontWeight: '700', border: '1px solid #bfdbfe' }}>
+                                    📝 Admin Override
+                                  </span>
+                                ) : (
+                                  <span style={{ color: '#94a3b8' }}>{rec.check_in_camera || 'Staff Inbound Entry'}</span>
+                                )}
+                              </div>
+                            </td>
+                            <td style={{ padding: '10px 14px' }}>
+                              <div style={{
+                                fontFamily: 'var(--font-mono)',
                                 fontWeight: '700',
-                                fontSize: '11px'
+                                color: rec.is_checkout_verified ? '#15803d' : '#b45309'
                               }}>
-                                ✓ Completed
-                              </span>
-                            ) : (
+                                {rec.is_checkout_verified ? (rec.check_out_display || formatTimeIST(rec.check_out_time)) : '● On Duty'}
+                              </div>
+                              <div style={{ fontSize: '10px', marginTop: '2px' }}>
+                                {isManualOut ? (
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', padding: '1px 5px', borderRadius: '4px', backgroundColor: '#eff6ff', color: '#1d4ed8', fontWeight: '700', border: '1px solid #bfdbfe' }}>
+                                    📝 Admin Override
+                                  </span>
+                                ) : (
+                                  <span style={{ color: '#94a3b8' }}>
+                                    {rec.is_checkout_verified ? (rec.check_out_camera || 'Staff Check-Out Exit') : 'Shift Ongoing'}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td style={{ padding: '10px 14px' }}>
+                              <div style={{ fontWeight: '800', color: '#0f172a', fontSize: '12px' }}>
+                                {rec.working_str || rec.duration_str || `${rec.duration_minutes}m`}
+                              </div>
+                              <div style={{ fontSize: '10px', color: '#64748b' }}>
+                                Span: {rec.shift_span_str || rec.duration_str || '—'}
+                              </div>
+                            </td>
+                            <td style={{ padding: '10px 14px' }}>
+                              <div style={{ fontWeight: '700', color: (rec.break_minutes > 60 ? '#dc2626' : '#b45309') }}>
+                                {rec.break_str || '0h 00m'}
+                              </div>
+                              <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                                {rec.break_count ? `${rec.break_count} breaks` : '0 breaks'}
+                              </div>
+                            </td>
+                            <td style={{ padding: '10px 14px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <span style={{
+                                  padding: '2px 7px',
+                                  borderRadius: '6px',
+                                  fontSize: '11px',
+                                  fontWeight: '800',
+                                  backgroundColor: prodBg,
+                                  color: prodColor,
+                                  border: `1px solid ${prodColor}33`
+                                }}>
+                                  {prod}%
+                                </span>
+                              </div>
+                              <div style={{ width: '48px', height: '4px', backgroundColor: '#e2e8f0', borderRadius: '2px', overflow: 'hidden', marginTop: '3px' }}>
+                                <div style={{ width: `${Math.min(100, prod)}%`, height: '100%', backgroundColor: prodColor }}></div>
+                              </div>
+                            </td>
+                            <td style={{ padding: '10px 14px' }}>
                               <span style={{
-                                padding: '3px 8px',
-                                borderRadius: '9999px',
-                                backgroundColor: '#fef3c7',
-                                color: '#b45309',
-                                fontWeight: '700',
-                                fontSize: '11px'
-                              }}>
-                                ● On Duty
-                              </span>
-                            )}
-                          </td>
-                          <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                            <button
-                              onClick={() => {
-                                setActiveTab('camera_journey');
-                                setExpandedDays({ [rec.date]: true });
-                              }}
-                              style={{
-                                padding: '4px 10px',
-                                fontSize: '11px',
-                                fontWeight: '700',
-                                borderRadius: '6px',
-                                border: '1px solid #bae6fd',
-                                backgroundColor: '#f0f9ff',
-                                color: '#0284c7',
-                                cursor: 'pointer',
                                 display: 'inline-flex',
                                 alignItems: 'center',
-                                gap: '4px'
-                              }}
-                              title={`View passage timeline for ${rec.date}`}
-                            >
-                              <span>View Journey</span>
-                              <span>➔</span>
-                            </button>
-                          </td>
-                        </tr>
-                      ))
+                                gap: '6px',
+                                padding: '2px 8px',
+                                borderRadius: '6px',
+                                backgroundColor: '#f1f5f9',
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: '11px',
+                                fontWeight: '700'
+                              }}>
+                                {(() => {
+                                  const dayCps = allCheckpoints.filter(c => c.timestamp && c.timestamp.startsWith(rec.date));
+                                  const cIns = dayCps.filter(c => c.event_type === 'IN').length;
+                                  const cOuts = dayCps.filter(c => c.event_type === 'OUT').length;
+                                  const inVal = Math.max(rec.in_count ?? 1, cIns || 1);
+                                  const outVal = Math.max(rec.out_count ?? (rec.is_checkout_verified ? 1 : 0), cOuts);
+                                  return (
+                                    <>
+                                      <span style={{ color: '#15803d' }}>{inVal} In</span>
+                                      <span style={{ color: '#94a3b8' }}>/</span>
+                                      <span style={{ color: '#b45309' }}>{outVal} Out</span>
+                                    </>
+                                  );
+                                })()}
+                              </span>
+                            </td>
+                            <td style={{ padding: '10px 14px' }}>
+                              {rec.is_checkout_verified ? (
+                                <span style={{
+                                  padding: '3px 8px',
+                                  borderRadius: '9999px',
+                                  backgroundColor: '#ecfdf5',
+                                  color: '#047857',
+                                  fontWeight: '700',
+                                  fontSize: '11px'
+                                }}>
+                                  ✓ Completed
+                                </span>
+                              ) : (
+                                <span style={{
+                                  padding: '3px 8px',
+                                  borderRadius: '9999px',
+                                  backgroundColor: '#fef3c7',
+                                  color: '#b45309',
+                                  fontWeight: '700',
+                                  fontSize: '11px'
+                                }}>
+                                  ● On Duty
+                                </span>
+                              )}
+                            </td>
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                {isToday && isEnrolled && (
+                                  <button
+                                    onClick={() => {
+                                      setManualAction(rec.is_checkout_verified ? 'check_in' : 'check_out');
+                                      setManualModalOpen(true);
+                                    }}
+                                    style={{
+                                      padding: '3px 8px',
+                                      fontSize: '11px',
+                                      fontWeight: '700',
+                                      borderRadius: '5px',
+                                      border: 'none',
+                                      backgroundColor: rec.is_checkout_verified ? '#10b981' : '#f59e0b',
+                                      color: '#ffffff',
+                                      cursor: 'pointer'
+                                    }}
+                                    title={rec.is_checkout_verified ? "Check-in employee back on duty" : "Check-out employee"}
+                                  >
+                                    {rec.is_checkout_verified ? '🟢 In' : '🚪 Out'}
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => {
+                                    setActiveTab('camera_journey');
+                                    setExpandedDays({ [rec.date]: true });
+                                  }}
+                                  style={{
+                                    padding: '4px 10px',
+                                    fontSize: '11px',
+                                    fontWeight: '700',
+                                    borderRadius: '6px',
+                                    border: '1px solid #bae6fd',
+                                    backgroundColor: '#f0f9ff',
+                                    color: '#0284c7',
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                  }}
+                                  title={`View passage timeline for ${rec.date}`}
+                                >
+                                  <span>Journey</span>
+                                  <span>➔</span>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
@@ -1131,6 +1295,25 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
                                       {/* 1. Verified Face Capture */}
                                       {(() => {
+                                        if (cp.is_manual || cp.photo_b64 === 'MANUAL_OVERRIDE') {
+                                          return (
+                                            <div style={{
+                                              padding: '8px 12px',
+                                              borderRadius: '8px',
+                                              backgroundColor: '#eff6ff',
+                                              border: '1.5px dashed #3b82f6',
+                                              display: 'flex',
+                                              flexDirection: 'column',
+                                              alignItems: 'center',
+                                              justifyContent: 'center',
+                                              gap: '2px',
+                                              color: '#1d4ed8'
+                                            }} title="Manual Passage Authorized by Administrator">
+                                              <span style={{ fontSize: '18px' }}>📝</span>
+                                              <span style={{ fontSize: '9px', fontWeight: '800', textTransform: 'uppercase' }}>Admin Override</span>
+                                            </div>
+                                          );
+                                        }
                                         const faceImg = cp.face_b64 || cp.photo_b64 || crops[idx % Math.max(1, crops.length)] || activeCrop;
                                         if (!faceImg) return null;
                                         const src = faceImg.startsWith('data:') ? faceImg : `data:image/jpeg;base64,${faceImg}`;
@@ -1381,6 +1564,211 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
                 }}
               >
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manual Override Action Modal */}
+      {manualModalOpen && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.65)',
+          backdropFilter: 'blur(3px)',
+          zIndex: 10002,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px'
+        }}>
+          <div style={{
+            backgroundColor: '#ffffff',
+            borderRadius: '14px',
+            padding: '24px',
+            width: '100%',
+            maxWidth: '440px',
+            boxShadow: '0 20px 25px -5px rgba(0,0,0,0.25)',
+            border: '1px solid #e2e8f0'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '20px' }}>{manualAction === 'check_out' ? '🚪' : '🟢'}</span>
+                <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '800', color: '#0f172a' }}>
+                  {manualAction === 'check_out' ? 'Manual Check-Out Override' : 'Manual Check-In Override'}
+                </h3>
+              </div>
+              <button
+                onClick={() => setManualModalOpen(false)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: '#64748b' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p style={{ margin: '0 0 14px 0', fontSize: '12px', color: '#64748b', lineHeight: '1.5' }}>
+              Record administrative attendance override for <strong>{empName}</strong> ({empId}).
+              This logs an audit event and updates active working/break durations.
+            </p>
+
+            {manualNotice && (
+              <div style={{
+                padding: '8px 12px',
+                borderRadius: '6px',
+                marginBottom: '14px',
+                fontSize: '12px',
+                fontWeight: '700',
+                backgroundColor: manualNotice.ok ? '#dcfce7' : '#fee2e2',
+                color: manualNotice.ok ? '#15803d' : '#dc2626'
+              }}>
+                {manualNotice.msg}
+              </div>
+            )}
+
+            <div style={{ marginBottom: '14px' }}>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: '800', color: '#475569', marginBottom: '6px', textTransform: 'uppercase' }}>
+                Action
+              </label>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  onClick={() => setManualAction('check_out')}
+                  style={{
+                    flex: 1,
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    border: manualAction === 'check_out' ? '2px solid #ea580c' : '1px solid #cbd5e1',
+                    backgroundColor: manualAction === 'check_out' ? '#fff7ed' : '#ffffff',
+                    color: manualAction === 'check_out' ? '#ea580c' : '#475569',
+                    fontWeight: '700',
+                    fontSize: '12px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  🚪 Check-Out (Exit)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setManualAction('check_in')}
+                  style={{
+                    flex: 1,
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    border: manualAction === 'check_in' ? '2px solid #059669' : '1px solid #cbd5e1',
+                    backgroundColor: manualAction === 'check_in' ? '#ecfdf5' : '#ffffff',
+                    color: manualAction === 'check_in' ? '#059669' : '#475569',
+                    fontWeight: '700',
+                    fontSize: '12px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  🟢 Check-In (Entry)
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: '800', color: '#475569', marginBottom: '6px', textTransform: 'uppercase' }}>
+                  Effective Time
+                </label>
+                <input
+                  type="time"
+                  value={manualTime}
+                  onChange={(e) => setManualTime(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    border: '1px solid #cbd5e1',
+                    fontSize: '13px',
+                    fontFamily: 'var(--font-mono)',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: '800', color: '#475569', marginBottom: '6px', textTransform: 'uppercase' }}>
+                  Date
+                </label>
+                <input
+                  type="date"
+                  value={getTodayDateStr()}
+                  disabled
+                  style={{
+                    width: '100%',
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    border: '1px solid #e2e8f0',
+                    backgroundColor: '#f8fafc',
+                    fontSize: '13px',
+                    color: '#64748b',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '18px' }}>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: '800', color: '#475569', marginBottom: '6px', textTransform: 'uppercase' }}>
+                Override Reason / Note
+              </label>
+              <input
+                type="text"
+                value={manualReason}
+                onChange={(e) => setManualReason(e.target.value)}
+                placeholder="e.g. Approved shift end, regular checkout..."
+                style={{
+                  width: '100%',
+                  padding: '8px 10px',
+                  borderRadius: '6px',
+                  border: '1px solid #cbd5e1',
+                  fontSize: '12px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={() => setManualModalOpen(false)}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: '6px',
+                  border: '1px solid #cbd5e1',
+                  backgroundColor: '#ffffff',
+                  color: '#475569',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={manualLoading}
+                onClick={handleManualAttendance}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: '6px',
+                  border: 'none',
+                  backgroundColor: manualAction === 'check_out' ? '#ea580c' : '#059669',
+                  color: '#ffffff',
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  cursor: manualLoading ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {manualLoading ? 'Applying...' : `Apply ${manualAction === 'check_out' ? 'Check-Out' : 'Check-In'}`}
               </button>
             </div>
           </div>
