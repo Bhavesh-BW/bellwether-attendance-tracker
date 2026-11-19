@@ -83,7 +83,16 @@ export default function App() {
       }
       if (camRes?.cameras) {
         setCameras(camRes.cameras);
-        if (camRes.active) setActiveCamera(camRes.active);
+        if (camRes.active) {
+          setActiveCamera(camRes.active);
+        } else if (camRes.cameras.length > 0) {
+          setActiveCamera(camRes.cameras[0].id);
+        } else {
+          setActiveCamera(null);
+        }
+      } else {
+        setCameras([]);
+        setActiveCamera(null);
       }
       if (trendRes) setTrendData(trendRes);
       if (visRes) setVisitors(visRes);
@@ -257,7 +266,7 @@ export default function App() {
       const res = await fetch('/api/cameras/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, location: location || name, rtsp, role: role || 'entry' })
+        body: JSON.stringify({ name, location: location || name, rtsp, role: role || 'entry', org_id: activeOrgIdRef.current })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to add camera');
@@ -273,21 +282,11 @@ export default function App() {
   };
 
   const handleRemoveCamera = async (camId) => {
-    const camToRemove = cameras.find((c) => c.id === camId);
-    const entryCameras = cameras.filter((c) => c.role === 'entry');
-    if (camToRemove?.role === 'entry' && entryCameras.length <= 1) {
-      alert("Cannot remove camera: At least one camera with 'entry' role must remain active in the system.");
-      return;
-    }
-    if (cameras.length <= 1) {
-      alert("At least one camera must remain active. Cannot delete the only remaining camera checkpoint.");
-      return;
-    }
     try {
       const res = await fetch('/api/cameras/remove', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ camera_id: camId })
+        body: JSON.stringify({ camera_id: camId, org_id: activeOrgIdRef.current })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to remove camera');
@@ -303,7 +302,7 @@ export default function App() {
       const res = await fetch('/api/cameras/edit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, name, location, rtsp, role })
+        body: JSON.stringify({ id, name, location, rtsp, role, org_id: activeOrgIdRef.current })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to edit camera');

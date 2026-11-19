@@ -86,45 +86,49 @@ def load_cameras_from_db():
         cur.execute("ALTER TABLE cameras ADD COLUMN role TEXT DEFAULT 'entry'")
     except Exception:
         pass
+    try:
+        cur.execute("ALTER TABLE cameras ADD COLUMN org_id TEXT DEFAULT 'bellwether'")
+    except Exception:
+        pass
     cur.execute("UPDATE cameras SET role = 'exit' WHERE (id LIKE '%exit%' OR name LIKE '%exit%') AND (role IS NULL OR role = 'entry')")
     cur.execute("UPDATE cameras SET role = 'entry' WHERE (id LIKE '%main%' OR name LIKE '%entry%' OR id LIKE '%staff%') AND (role IS NULL)")
-    
-    # Ensure staff entry and exit cameras are always registered
-    cur.execute("INSERT OR IGNORE INTO cameras (id, name, location, rtsp, created_at, role) VALUES ('staff', 'Staff Inbound Entry', 'Staff Gate 01 Entry', 'rtsp://124.123.89.162:31554/live/staff', datetime('now'), 'entry')")
-    cur.execute("INSERT OR IGNORE INTO cameras (id, name, location, rtsp, created_at, role) VALUES ('staff_exit', 'Staff Check-Out Exit', 'Staff Gate 02 Exit', 'rtsp://124.123.89.162:31554/live/staff_exit', datetime('now'), 'exit')")
+
+    # Register staff entry and exit cameras for medanta (Demo Hospital)
+    cur.execute("INSERT OR IGNORE INTO cameras (id, name, location, rtsp, created_at, role, org_id) VALUES ('staff', 'Staff Inbound Entry', 'Staff Gate 01 Entry', 'rtsp://124.123.89.162:31554/live/staff', datetime('now'), 'entry', 'medanta')")
+    cur.execute("INSERT OR IGNORE INTO cameras (id, name, location, rtsp, created_at, role, org_id) VALUES ('staff_exit', 'Staff Check-Out Exit', 'Staff Gate 02 Exit', 'rtsp://124.123.89.162:31554/live/staff_exit', datetime('now'), 'exit', 'medanta')")
     cur.execute("UPDATE cameras SET rtsp = 'rtsp://124.123.89.162:31554/live/staff' WHERE id = 'staff'")
     cur.execute("UPDATE cameras SET rtsp = 'rtsp://124.123.89.162:31554/live/staff_exit' WHERE id = 'staff_exit'")
     # Remove unreachable/404 streams so they don't consume CPU
     cur.execute("DELETE FROM cameras WHERE id IN ('recep1', 'outside')")
     conn.commit()
 
-    cur.execute("SELECT id, name, location, rtsp, role FROM cameras ORDER BY CASE WHEN id='staff' THEN 0 WHEN id='staff_exit' THEN 1 ELSE 2 END, rowid ASC")
+    cur.execute("SELECT id, name, location, rtsp, role, org_id FROM cameras ORDER BY rowid ASC")
     rows = cur.fetchall()
     if not rows:
         default_cams = [
-            ('staff', 'Staff Inbound Entry', 'Staff Gate 01 Entry', 'rtsp://124.123.89.162:31554/live/staff', 'entry'),
-            ('staff_exit', 'Staff Check-Out Exit', 'Staff Gate 02 Exit', 'rtsp://124.123.89.162:31554/live/staff_exit', 'exit'),
-            ('main', 'Main Porch Entry — Inbound', 'Gate 01 Main Entry', f'{RTSP_BASE}/main', 'entry'),
-            ('cam_cd9e9a', 'Main porch exit', 'porch exit', f'{RTSP_BASE}/main_exit', 'exit')
+            ('staff', 'Staff Inbound Entry', 'Staff Gate 01 Entry', 'rtsp://124.123.89.162:31554/live/staff', 'entry', 'medanta'),
+            ('staff_exit', 'Staff Check-Out Exit', 'Staff Gate 02 Exit', 'rtsp://124.123.89.162:31554/live/staff_exit', 'exit', 'medanta')
         ]
         now_ts = get_ist_iso()
-        for cid, cname, cloc, crtsp, crole in default_cams:
-            cur.execute('INSERT OR IGNORE INTO cameras (id, name, location, rtsp, created_at, role) VALUES (?, ?, ?, ?, ?, ?)',
-                        (cid, cname, cloc, crtsp, now_ts, crole))
+        for cid, cname, cloc, crtsp, crole, corg in default_cams:
+            cur.execute('INSERT OR IGNORE INTO cameras (id, name, location, rtsp, created_at, role, org_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                        (cid, cname, cloc, crtsp, now_ts, crole, corg))
         conn.commit()
-        cur.execute("SELECT id, name, location, rtsp, role FROM cameras ORDER BY CASE WHEN id='staff' THEN 0 WHEN id='staff_exit' THEN 1 ELSE 2 END, rowid ASC")
+        cur.execute("SELECT id, name, location, rtsp, role, org_id FROM cameras ORDER BY rowid ASC")
         rows = cur.fetchall()
     conn.close()
 
     cams = {}
     for r in rows:
         crole = r[4] if len(r) > 4 and r[4] else ('exit' if ('exit' in r[0].lower() or 'exit' in r[1].lower()) else 'entry')
+        corg = r[5] if len(r) > 5 and r[5] else 'bellwether'
         cams[r[0]] = {
             'id': r[0],
             'name': r[1],
             'location': r[2],
             'rtsp': r[3],
-            'role': crole
+            'role': crole,
+            'org_id': corg
         }
     return cams
 
@@ -3301,18 +3305,26 @@ class FaceTrackerEngine:
         """Set the active org."""
         self.set_setting('active_org_id', org_id)
 
-    def get_cameras(self):
-        return list(CAMERA_SOURCES.values())
+    def get_cameras(self, org_id: str = None):
+        if org_id is None:
+            org_id = self.get_active_org()
+        if not org_id or org_id == 'all':
+            return list(CAMERA_SOURCES.values())
+        if org_id in ('bellwether', 'default'):
+            return [c for c in CAMERA_SOURCES.values() if c.get('org_id') in ('bellwether', 'default')]
+        return [c for c in CAMERA_SOURCES.values() if c.get('org_id') == org_id]
 
-    def add_camera(self, name: str, location: str, rtsp: str, role: str = None):
+    def add_camera(self, name: str, location: str, rtsp: str, role: str = None, org_id: str = None):
         cam_id = f"cam_{uuid.uuid4().hex[:6]}"
         now_ts = get_ist_iso()
         if not role:
             role = 'exit' if ('exit' in name.lower() or 'exit' in location.lower()) else 'entry'
+        if not org_id:
+            org_id = self.get_active_org()
         conn = sqlite3.connect(DB_PATH, timeout=20.0)
         cur = conn.cursor()
-        cur.execute('INSERT INTO cameras (id, name, location, rtsp, created_at, role) VALUES (?, ?, ?, ?, ?, ?)',
-                    (cam_id, name, location, rtsp, now_ts, role))
+        cur.execute('INSERT INTO cameras (id, name, location, rtsp, created_at, role, org_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (cam_id, name, location, rtsp, now_ts, role, org_id))
         conn.commit()
         conn.close()
         cam_obj = {
@@ -3320,7 +3332,8 @@ class FaceTrackerEngine:
             'name': name,
             'location': location,
             'rtsp': rtsp,
-            'role': role
+            'role': role,
+            'org_id': org_id
         }
         CAMERA_SOURCES[cam_id] = cam_obj
         # Start new stream pipeline immediately
@@ -3333,14 +3346,6 @@ class FaceTrackerEngine:
     def remove_camera(self, camera_id: str):
         if camera_id not in CAMERA_SOURCES:
             return False, "Camera not found"
-        if len(CAMERA_SOURCES) <= 1:
-            return False, "Cannot delete camera: at least one camera must remain active"
-
-        cam_to_remove = CAMERA_SOURCES[camera_id]
-        if cam_to_remove.get('role') == 'entry':
-            other_entry_cams = [cid for cid, c in CAMERA_SOURCES.items() if cid != camera_id and c.get('role') == 'entry']
-            if not other_entry_cams:
-                return False, "Cannot delete camera: at least one camera with 'entry' role must remain active"
 
         conn = sqlite3.connect(DB_PATH, timeout=20.0)
         cur = conn.cursor()
@@ -3362,7 +3367,7 @@ class FaceTrackerEngine:
 
         return True, "Camera removed successfully"
 
-    def edit_camera(self, camera_id: str, name: str, location: str, rtsp: str, role: str = None):
+    def edit_camera(self, camera_id: str, name: str, location: str, rtsp: str, role: str = None, org_id: str = None):
         if camera_id not in CAMERA_SOURCES:
             return False, f"Camera {camera_id} not found"
 
@@ -3371,15 +3376,16 @@ class FaceTrackerEngine:
         new_location = location.strip() if location else cam['location']
         new_rtsp = rtsp.strip() if rtsp else cam['rtsp']
         new_role = role.strip() if role else cam.get('role', 'entry')
+        new_org = org_id.strip() if org_id else cam.get('org_id', 'bellwether')
 
         # Update SQLite DB
         conn = sqlite3.connect(DB_PATH, timeout=20.0)
         cur = conn.cursor()
         cur.execute('''
             UPDATE cameras 
-            SET name = ?, location = ?, rtsp = ?, role = ?
+            SET name = ?, location = ?, rtsp = ?, role = ?, org_id = ?
             WHERE id = ?
-        ''', (new_name, new_location, new_rtsp, new_role, camera_id))
+        ''', (new_name, new_location, new_rtsp, new_role, new_org, camera_id))
         conn.commit()
         conn.close()
 
@@ -3388,6 +3394,7 @@ class FaceTrackerEngine:
         cam['location'] = new_location
         cam['rtsp'] = new_rtsp
         cam['role'] = new_role
+        cam['org_id'] = new_org
 
         # If pipeline exists, stop old and restart with new RTSP URL
         if camera_id in self.pipelines:
@@ -5231,15 +5238,21 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
             return self.send_json(200, {'orgs': orgs, 'active_org_id': active_org})
 
         if path == '/api/cameras':
+            params = urllib.parse.parse_qs(parsed.query)
+            org_id = params.get('org_id', [tracker.get_active_org()])[0]
+            org_cams = tracker.get_cameras(org_id=org_id)
             cams = []
-            for c in tracker.get_cameras():
+            for c in org_cams:
                 pipe = tracker.get_pipeline(c['id'])
                 c_copy = dict(c)
                 c_copy['is_connected'] = pipe.is_rtsp_connected if pipe else False
                 c_copy['fps'] = pipe.fps if pipe else 0.0
                 c_copy['error_msg'] = pipe.error_msg if pipe else None
                 cams.append(c_copy)
-            return self.send_json(200, {'cameras': cams, 'active': tracker.active_camera})
+            active_cam = tracker.active_camera
+            if active_cam not in [c['id'] for c in org_cams]:
+                active_cam = org_cams[0]['id'] if org_cams else None
+            return self.send_json(200, {'cameras': cams, 'active': active_cam})
 
         # SSE Stream for Instant Tactical Threat Alerts & Transit Events
         if path == '/api/alerts/events':
@@ -5457,18 +5470,25 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
             location = (body.get('location') or '').strip() or name
             rtsp = (body.get('rtsp') or '').strip()
             role = (body.get('role') or '').strip() or 'entry'
+            org_id = (body.get('org_id') or '').strip() or tracker.get_active_org()
             if not name or not rtsp:
                 return self.send_json(400, {'error': 'Camera name and RTSP stream URL are required'})
-            cam = tracker.add_camera(name, location, rtsp, role=role)
-            return self.send_json(200, {'success': True, 'camera': cam, 'camera_id': cam['id'], 'cameras': tracker.get_cameras()})
+            cam = tracker.add_camera(name, location, rtsp, role=role, org_id=org_id)
+            org_cams = tracker.get_cameras(org_id=org_id)
+            return self.send_json(200, {'success': True, 'camera': cam, 'camera_id': cam['id'], 'cameras': org_cams})
 
         if path in ('/api/cameras/remove', '/api/cameras/delete'):
             camera_id = body.get('id') or body.get('camera_id') or body.get('stream')
+            org_id = (body.get('org_id') or '').strip() or tracker.get_active_org()
             if not camera_id:
                 return self.send_json(400, {'error': 'Missing camera_id'})
             ok, msg = tracker.remove_camera(camera_id)
             if ok:
-                return self.send_json(200, {'success': True, 'cameras': tracker.get_cameras(), 'active': tracker.active_camera})
+                org_cams = tracker.get_cameras(org_id=org_id)
+                active_cam = tracker.active_camera
+                if active_cam not in [c['id'] for c in org_cams]:
+                    active_cam = org_cams[0]['id'] if org_cams else None
+                return self.send_json(200, {'success': True, 'cameras': org_cams, 'active': active_cam})
             return self.send_json(400, {'error': msg})
 
         if path in ('/api/cameras/edit', '/api/cameras/update'):
@@ -5477,11 +5497,13 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
             location = (body.get('location') or '').strip()
             rtsp = (body.get('rtsp') or '').strip()
             role = (body.get('role') or '').strip() or None
+            org_id = (body.get('org_id') or '').strip() or tracker.get_active_org()
             if not camera_id:
                 return self.send_json(400, {'error': 'Missing camera_id'})
-            ok, res = tracker.edit_camera(camera_id, name, location, rtsp, role=role)
+            ok, res = tracker.edit_camera(camera_id, name, location, rtsp, role=role, org_id=org_id)
             if ok:
-                return self.send_json(200, {'success': True, 'camera': res, 'cameras': tracker.get_cameras(), 'active': tracker.active_camera})
+                org_cams = tracker.get_cameras(org_id=org_id)
+                return self.send_json(200, {'success': True, 'camera': res, 'cameras': org_cams, 'active': tracker.active_camera})
             return self.send_json(400, {'error': res})
 
         if path == '/api/blacklist/add':

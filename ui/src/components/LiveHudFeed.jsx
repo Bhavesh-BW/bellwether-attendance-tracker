@@ -279,13 +279,16 @@ export default function LiveHudFeed({
   useEffect(() => {
     if (cameras && cameras.length > 0) {
       if (!cameras.some(c => c.id === slot1Camera)) {
-        const staffEntry = cameras.find(c => c.id === 'staff') || cameras[0];
-        if (staffEntry) setSlot1Camera(staffEntry.id);
+        const entryCam = cameras.find(c => c.role === 'entry') || cameras[0];
+        if (entryCam) setSlot1Camera(entryCam.id);
       }
       if (!cameras.some(c => c.id === slot2Camera)) {
-        const staffExit = cameras.find(c => c.id === 'staff_exit') || cameras.find(c => c.id.includes('exit')) || cameras[1] || cameras[0];
-        if (staffExit) setSlot2Camera(staffExit.id);
+        const exitCam = cameras.find(c => c.role === 'exit' && c.id !== slot1Camera) || cameras.find(c => c.id !== slot1Camera) || cameras[1] || cameras[0];
+        if (exitCam) setSlot2Camera(exitCam.id);
       }
+    } else {
+      setSlot1Camera(null);
+      setSlot2Camera(null);
     }
   }, [cameras]);
 
@@ -903,7 +906,40 @@ export default function LiveHudFeed({
 
 
       {/* Main Video View Area */}
-      {currentViewMode === 'grid' ? (
+      {(!cameras || cameras.length === 0) ? (
+        <div style={{
+          padding: '48px 24px',
+          textAlign: 'center',
+          backgroundColor: '#0f172a',
+          borderRadius: '12px',
+          border: '1px dashed #334155',
+          color: '#94a3b8',
+          margin: '12px 0'
+        }}>
+          <div style={{ fontSize: '36px', marginBottom: '8px' }}>📹</div>
+          <div style={{ fontSize: '16px', fontWeight: '800', color: '#f8fafc', marginBottom: '6px' }}>
+            No Cameras Assigned to this Organization
+          </div>
+          <div style={{ fontSize: '13px', color: '#94a3b8', maxWidth: '440px', margin: '0 auto 16px auto', lineHeight: '1.5' }}>
+            Each organization operates with its own dedicated camera network. Click below to add an RTSP stream for this organization.
+          </div>
+          <button
+            onClick={handleOpenAddModal}
+            style={{
+              padding: '8px 18px',
+              backgroundColor: '#0284c7',
+              color: '#ffffff',
+              border: 'none',
+              borderRadius: '6px',
+              fontSize: '13px',
+              fontWeight: '700',
+              cursor: 'pointer'
+            }}
+          >
+            + Add Camera
+          </button>
+        </div>
+      ) : currentViewMode === 'grid' ? (
         /* DUAL CAMERA GRID VIEW */
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: '16px', flex: 1 }}>
           {/* SLOT 1: ENTRY CAMERA */}
