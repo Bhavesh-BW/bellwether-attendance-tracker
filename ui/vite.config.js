@@ -3,14 +3,14 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   server: {
     host: '127.0.0.1',
-    port: 8191,
+    port: 8192,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8198',
+        target: 'http://127.0.0.1:8199',
         changeOrigin: true
       },
       '/stream.mjpg': {
-        target: 'http://127.0.0.1:8198',
+        target: 'http://127.0.0.1:8199',
         changeOrigin: true
       }
     }

@@ -67,7 +67,7 @@ MODELS = ROOT / 'models'
 
 DB_PATH = os.environ.get('FACE_TRACKER_DB', str(ROOT / 'face_tracker.db'))
 RTSP_BASE = os.environ.get('RTSP_BASE', 'rtsp://124.123.89.162:31554/live')
-PORT = int(os.environ.get('PORT', '8198'))
+PORT = int(os.environ.get('PORT', '8199'))
 HOST = os.environ.get('HOST', '0.0.0.0')
 
 def load_cameras_from_db():
