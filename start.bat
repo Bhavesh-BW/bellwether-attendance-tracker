@@ -1,7 +1,7 @@
 @echo off
-title Medanta Hospital - Staff Attendance Tracking System
+title GoDezk AI Attendance Tracker - Multi-Org Enterprise Edition
 echo ======================================================================
-echo   Medanta Hospital - Staff Attendance Tracking System
+echo   GoDezk AI Attendance Tracker - Multi-Org Enterprise Edition
 echo   Opening at: http://localhost:8198
 echo ======================================================================
 cd /d "%~dp0backend"
