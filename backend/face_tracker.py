@@ -2900,12 +2900,16 @@ class FaceTrackerEngine:
         # -------------------------------------------------------------
         if crole == 'exit':
             if v:
-                v['today_status'] = 'checked_out'
+                v['today_status'] = 'in_hospital'
                 v['today_check_out'] = timestamp_iso
                 v['today_check_out_camera'] = camera_id
                 v['today_check_out_camera_name'] = cam_name
-                v['is_checkout_verified'] = True
+                v['is_checkout_verified'] = False
+                v['is_absent_from_premises'] = True
                 v['exit_time_iso'] = timestamp_iso
+                v['last_seen'] = timestamp_iso
+                v['last_camera'] = camera_id
+                v['last_camera_name'] = cam_name
 
             # Debounce: avoid duplicate DB writes within 10s on consecutive frames
             cooldown_key = (employee_id, 'exit')
@@ -2927,7 +2931,7 @@ class FaceTrackerEngine:
                             employee_id, date, check_in_time, check_in_camera, check_in_camera_name,
                             check_out_time, check_out_camera, check_out_camera_name,
                             duration_minutes, status, is_checkout_verified, sightings_count, cameras_visited, org_id
-                        ) VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?, 0, 'checked_out', 1, 1, ?, ?)
+                        ) VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?, 0, 'checked_out', 0, 1, ?, ?)
                     """, (employee_id, date_str, timestamp_iso, camera_id, cam_name, camera_id, emp_org))
                 else:
                     rec_id, ex_in, ex_out, scnt, cams_v, prev_dur = row
@@ -2953,8 +2957,8 @@ class FaceTrackerEngine:
                             check_out_camera = ?,
                             check_out_camera_name = ?,
                             duration_minutes = ?,
-                            status = 'checked_out',
-                            is_checkout_verified = 1,
+                            status = 'in_hospital',
+                            is_checkout_verified = 0,
                             sightings_count = sightings_count + 1,
                             cameras_visited = ?
                         WHERE id = ?
@@ -3704,7 +3708,7 @@ class FaceTrackerEngine:
                 total_break_mins += m['break_minutes']
                 total_prod += m['productivity_pct']
 
-            for b in m.get('extended_breaks', []):
+            for b in m.get('breaks', []):
                 extended_absences_all.append({
                     'break_id': b.get('break_id'),
                     'employee_id': emp_id,
@@ -3722,6 +3726,7 @@ class FaceTrackerEngine:
                     'entry_camera_name': b.get('entry_camera_name'),
                     'duration_minutes': b.get('duration_minutes', 0),
                     'duration_str': b.get('duration_str', '0m'),
+                    'is_extended': b.get('is_extended', False),
                     'overstay_minutes': b.get('overstay_minutes', 0),
                     'overstay_str': b.get('overstay_str', '0m'),
                     'status': b.get('status', 'Returned')
@@ -3762,7 +3767,7 @@ class FaceTrackerEngine:
                 'extended_breaks_count': m.get('extended_breaks_count', 0)
             })
 
-        extended_absences_all.sort(key=lambda x: (x['status'] != 'Currently Away', -x['duration_minutes']))
+        extended_absences_all.sort(key=lambda x: (x['status'] != 'Currently Away', x.get('exit_time') or ''), reverse=True)
 
         n_pres = max(1, present_count)
         avg_w = int(total_work_mins / n_pres) if present_count > 0 else 0
@@ -3771,6 +3776,8 @@ class FaceTrackerEngine:
 
         wh, wm = divmod(avg_w, 60)
         bh, bm = divmod(avg_b, 60)
+
+        ext_only = [b for b in extended_absences_all if b.get('is_extended')]
 
         summary = {
             'total_enrolled': len(rows),
@@ -3784,7 +3791,8 @@ class FaceTrackerEngine:
             'avg_break_minutes': avg_b,
             'avg_break_str': f"{bh}h {bm:02d}m",
             'avg_productivity_pct': avg_p,
-            'extended_absences_count': len(extended_absences_all)
+            'all_absences_count': len(extended_absences_all),
+            'extended_absences_count': len(ext_only)
         }
 
         return {
@@ -3792,7 +3800,10 @@ class FaceTrackerEngine:
             'org_id': org_id,
             'summary': summary,
             'employees': records,
-            'extended_absences': extended_absences_all
+            'all_absences': extended_absences_all,
+            'extended_absences': ext_only,
+            'absences_count': len(extended_absences_all),
+            'extended_absences_count': len(ext_only)
         }
 
     def _seed_staff_and_30d_attendance(self):
@@ -5695,15 +5706,15 @@ class FaceTrackerEngine:
                     today_check_out = mem_cout
                     today_check_out_raw = mem_cout
                     today_check_out_cam = v_mem.get('today_check_out_camera')
-                    today_status = 'CHECKED OUT'
-                    is_checkout_verified = True
+                    if v_mem.get('is_checkout_verified') and v_mem.get('today_status') == 'checked_out':
+                        today_status = 'CHECKED OUT'
+                        is_checkout_verified = True
 
-                if v_mem.get('today_status') == 'checked_out' and (today_check_out or today_check_in):
+                if v_mem.get('today_status') == 'checked_out' and v_mem.get('is_checkout_verified'):
                     today_status = 'CHECKED OUT'
                     is_checkout_verified = True
-                elif v_mem.get('today_status') == 'in_hospital' and today_check_in:
+                elif today_check_in and not is_checkout_verified:
                     today_status = 'IN HOSPITAL'
-                    is_checkout_verified = False
 
             # If employee has not checked in today at all, enforce strictly clean absent state
             if not today_check_in:
@@ -5728,9 +5739,10 @@ class FaceTrackerEngine:
                 prod_pct = stats_30d.get('today_productivity_pct', 100.0) if stats_30d else 100.0
 
             now_ist = get_ist_now()
-            is_shift_ended = bool(today_status == 'CHECKED OUT' or is_checkout_verified)
+            is_manual_chk = bool(is_checkout_verified and (today_check_out_cam == 'manual_exit' or 'manual' in str(today_out_disp or '').lower()))
+            is_shift_ended = bool(is_checkout_verified and (today_status == 'CHECKED OUT' or is_manual_chk))
             is_exit_last = bool(cam_id and ('exit' in str(cam_id).lower() or 'exit' in str(cam_name).lower()))
-            # Problem 1: Exclude shift-ended / checked-out personnel from absent monitoring. Only track absent during active duty hours.
+            # Track absent on-duty personnel whose last sighting was an exit camera
             is_absent = bool(today_check_in and not is_shift_ended and is_exit_last)
             
             exit_iso = (last_seen if (is_exit_last and has_been_seen) else None) if is_absent else None
@@ -6057,7 +6069,7 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
             org_id = params.get('org_id', [tracker.get_active_org()])[0]
             return self.send_json(200, tracker.get_attendance_ledger(org_id=org_id, date_str=date_str))
 
-        if path in ('/api/attendance/extended-absences', '/api/employees/extended-absences'):
+        if path in ('/api/attendance/extended-absences', '/api/employees/extended-absences', '/api/attendance/absences', '/api/employees/absences'):
             params = urllib.parse.parse_qs(parsed.query)
             date_str = params.get('date', [get_ist_date_str()])[0]
             org_id = params.get('org_id', [tracker.get_active_org()])[0]
@@ -6065,8 +6077,10 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
             return self.send_json(200, {
                 'date': date_str,
                 'org_id': org_id,
-                'count': len(ledger.get('extended_absences', [])),
-                'extended_absences': ledger.get('extended_absences', [])
+                'count': len(ledger.get('all_absences', [])),
+                'all_absences': ledger.get('all_absences', []),
+                'extended_absences': ledger.get('extended_absences', []),
+                'extended_count': len(ledger.get('extended_absences', []))
             })
 
         if path == '/api/employees/attendance-history':

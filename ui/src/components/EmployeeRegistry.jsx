@@ -73,6 +73,7 @@ export default function EmployeeRegistry({
   // Sub-tab state for Absent from Premises View
   const [absentSubTab, setAbsentSubTab] = useState('currently_away'); // 'currently_away' | 'extended_log'
   const [extendedStatusFilter, setExtendedStatusFilter] = useState('all'); // 'all' | 'away' | 'returned'
+  const [absencePolicyFilter, setAbsencePolicyFilter] = useState('all'); // 'all' | 'short' | 'extended'
   const [extendedSearch, setExtendedSearch] = useState('');
 
   useEffect(() => {
@@ -681,9 +682,9 @@ export default function EmployeeRegistry({
   // Employees absent from premises during active duty hours (Checked in today, actively on duty, crossed exit gate and have not returned)
   const absentStaff = useMemo(() => {
     return visitors.filter(v => {
-      // Problem 1 Fix: Exclude staff whose shift has ended or who have checked out
-      const isShiftEnded = v.today_status === 'CHECKED OUT' || v.is_checkout_verified || v.is_shift_ended;
-      if (isShiftEnded) return false;
+      // Exclude staff whose shift has officially ended via verified manual checkout
+      const isManualOut = Boolean(v.is_checkout_verified && (v.today_check_out_camera === 'manual_exit' || String(v.today_check_out_camera_name || '').toLowerCase().includes('manual')));
+      if (isManualOut || v.is_shift_ended) return false;
 
       const hasCheckedIn = Boolean(v.today_check_in);
       if (!hasCheckedIn) return false;
@@ -693,9 +694,8 @@ export default function EmployeeRegistry({
                          (v.camera_name && String(v.camera_name).toLowerCase().includes('exit')) ||
                          (v.last_camera_name && String(v.last_camera_name).toLowerCase().includes('exit'));
       const isMarkedAbsent = Boolean(v.is_absent_from_premises);
-      const isNotBack = v.today_status !== 'IN HOSPITAL' && v.today_status !== 'in_hospital';
 
-      return (isMarkedAbsent || isExitLast) && isNotBack;
+      return isMarkedAbsent || isExitLast;
     }).map(v => {
       let missingMins = v.missing_mins || 0;
       const exitIso = v.exit_time_iso || v.today_check_out_raw || v.last_seen;
@@ -747,15 +747,17 @@ export default function EmployeeRegistry({
     });
   }, [absentStaff, deptFilter, absentFilter, search]);
 
-  // Problem 2: Extended Absences & Excessive Breaks (> 60 mins) Audit Log from Ledger
-  const extendedAbsences = useMemo(() => {
-    return ledgerData?.extended_absences || [];
+  // Absence & Break Audit Log from Ledger (tracks all breaks, including short 2m-15m trips and policy breaches)
+  const allAbsences = useMemo(() => {
+    return ledgerData?.all_absences || ledgerData?.extended_absences || [];
   }, [ledgerData]);
 
   const filteredExtended = useMemo(() => {
-    return extendedAbsences.filter(item => {
+    return allAbsences.filter(item => {
       if (extendedStatusFilter === 'away' && item.status !== 'Currently Away') return false;
       if (extendedStatusFilter === 'returned' && item.status !== 'Returned') return false;
+      if (absencePolicyFilter === 'short' && (item.duration_minutes || 0) >= 60) return false;
+      if (absencePolicyFilter === 'extended' && (item.duration_minutes || 0) < 60) return false;
       if (deptFilter !== 'all' && (item.department || 'General Staff') !== deptFilter) return false;
       if (extendedSearch.trim()) {
         const q = extendedSearch.toLowerCase();
@@ -766,19 +768,21 @@ export default function EmployeeRegistry({
       }
       return true;
     });
-  }, [extendedAbsences, extendedStatusFilter, deptFilter, extendedSearch]);
+  }, [allAbsences, extendedStatusFilter, absencePolicyFilter, deptFilter, extendedSearch]);
 
   const extendedStats = useMemo(() => {
-    const total = extendedAbsences.length;
-    const away = extendedAbsences.filter(b => b.status === 'Currently Away').length;
-    const returned = extendedAbsences.filter(b => b.status === 'Returned').length;
+    const total = allAbsences.length;
+    const away = allAbsences.filter(b => b.status === 'Currently Away').length;
+    const returned = allAbsences.filter(b => b.status === 'Returned').length;
+    const shortBreaks = allAbsences.filter(b => (b.duration_minutes || 0) < 60).length;
+    const breaches = allAbsences.filter(b => (b.duration_minutes || 0) >= 60).length;
     let maxOverstay = 0;
-    extendedAbsences.forEach(b => {
+    allAbsences.forEach(b => {
       if ((b.overstay_minutes || 0) > maxOverstay) maxOverstay = b.overstay_minutes;
     });
     const maxOverstayStr = maxOverstay > 0 ? (maxOverstay >= 60 ? `${Math.floor(maxOverstay / 60)}h ${maxOverstay % 60}m` : `${maxOverstay}m`) : '0m';
-    return { total, away, returned, maxOverstay, maxOverstayStr };
-  }, [extendedAbsences]);
+    return { total, away, returned, shortBreaks, breaches, maxOverstay, maxOverstayStr };
+  }, [allAbsences]);
 
   // Regular sorted visitors for 'details' tab
   const sortedVisitors = useMemo(() => {
@@ -2766,7 +2770,7 @@ export default function EmployeeRegistry({
                 }}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
-                ⚠️ Extended Break & Absence Log (&gt;60 mins)
+                📋 Absence & Break Audit Log
                 <span style={{
                   padding: '1px 7px',
                   borderRadius: '9999px',
@@ -2775,7 +2779,7 @@ export default function EmployeeRegistry({
                   backgroundColor: absentSubTab === 'extended_log' ? 'rgba(255,255,255,0.25)' : '#fee2e2',
                   color: absentSubTab === 'extended_log' ? '#ffffff' : '#991b1b'
                 }}>
-                  {extendedAbsences.length}
+                  {allAbsences.length}
                 </span>
               </button>
             </div>
@@ -3170,7 +3174,7 @@ export default function EmployeeRegistry({
             </div>
           )}
 
-          {/* SUB-VIEW 2: EXTENDED BREAK & ABSENCE AUDIT LOG (>60 MINS) */}
+          {/* SUB-VIEW 2: EXTENDED BREAK & ABSENCE AUDIT LOG */}
           {absentSubTab === 'extended_log' && (
             <div>
               {/* Executive Extended Absence Insight Banner */}
@@ -3201,31 +3205,35 @@ export default function EmployeeRegistry({
                   </div>
                   <div>
                     <h4 style={{ margin: 0, fontSize: '14px', fontWeight: '800', color: '#991b1b' }}>
-                      Extended Absence & Excessive Break Audit Log (&gt;60 mins Policy Limit)
+                      Shift Working Hours — Absence &amp; Break Audit Log
                     </h4>
                     <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#b91c1c' }}>
-                      Permanent historical audit log of staff absent from premises for more than 60 minutes. Preserved even after employees return or complete their shift.
+                      Permanent historical audit log of staff absent from premises during shift hours. Preserved even after employees return or complete their shift.
                     </p>
                   </div>
                 </div>
 
-                {/* Quick Metrics for Extended Breaks */}
+                {/* Quick Metrics for Absences & Breaks */}
                 <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
                   <div style={{ backgroundColor: '#ffffff', border: '1px solid #fca5a5', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
-                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#991b1b', textTransform: 'uppercase' }}>Total Breaches (&gt;60m)</div>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#991b1b', textTransform: 'uppercase' }}>Total Absences</div>
                     <div style={{ fontSize: '15px', fontWeight: '900', color: '#b91c1c' }}>{extendedStats.total} Records</div>
                   </div>
+                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #86efac', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#166534', textTransform: 'uppercase' }}>Short Breaks (&lt;60m)</div>
+                    <div style={{ fontSize: '15px', fontWeight: '900', color: '#15803d' }}>{extendedStats.shortBreaks} Breaks</div>
+                  </div>
                   <div style={{ backgroundColor: '#ffffff', border: '1px solid #fca5a5', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
-                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#991b1b', textTransform: 'uppercase' }}>Still Outside</div>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#991b1b', textTransform: 'uppercase' }}>Policy Breaches (&gt;60m)</div>
+                    <div style={{ fontSize: '15px', fontWeight: '900', color: '#b91c1c' }}>{extendedStats.breaches} Staff</div>
+                  </div>
+                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #fed7aa', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#9a3412', textTransform: 'uppercase' }}>Still Outside</div>
                     <div style={{ fontSize: '15px', fontWeight: '900', color: '#ea580c' }}>{extendedStats.away} Staff</div>
                   </div>
                   <div style={{ backgroundColor: '#ffffff', border: '1px solid #86efac', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
                     <div style={{ fontSize: '10px', fontWeight: '800', color: '#166534', textTransform: 'uppercase' }}>Returned to Duty</div>
                     <div style={{ fontSize: '15px', fontWeight: '900', color: '#15803d' }}>{extendedStats.returned} Staff</div>
-                  </div>
-                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #fca5a5', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
-                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#991b1b', textTransform: 'uppercase' }}>Max Overstay</div>
-                    <div style={{ fontSize: '15px', fontWeight: '900', color: '#dc2626' }}>+{extendedStats.maxOverstayStr}</div>
                   </div>
                 </div>
               </div>
@@ -3243,10 +3251,37 @@ export default function EmployeeRegistry({
                   />
                 </div>
 
+                {/* Policy Sub-Filter Pills */}
+                <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
+                  {[
+                    ['all', `All (${allAbsences.length})`],
+                    ['short', `Short <60m (${extendedStats.shortBreaks})`],
+                    ['extended', `Breaches >60m (${extendedStats.breaches})`]
+                  ].map(([id, label]) => (
+                    <button
+                      key={id}
+                      onClick={() => setAbsencePolicyFilter(id)}
+                      style={{
+                        padding: '3px 10px',
+                        borderRadius: '5px',
+                        border: 'none',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        cursor: 'pointer',
+                        backgroundColor: absencePolicyFilter === id ? '#ffffff' : 'transparent',
+                        color: absencePolicyFilter === id ? '#0284c7' : '#64748b',
+                        boxShadow: absencePolicyFilter === id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
                 {/* Status Sub-Filter Pills */}
                 <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
                   {[
-                    ['all', `All Logs (${extendedAbsences.length})`],
+                    ['all', `All Statuses (${allAbsences.length})`],
                     ['away', `🔴 Still Outside (${extendedStats.away})`],
                     ['returned', `✓ Returned (${extendedStats.returned})`]
                   ].map(([id, label]) => (
@@ -3302,10 +3337,10 @@ export default function EmployeeRegistry({
                       <tr>
                         <td colSpan="10" style={{ padding: '36px', textAlign: 'center', color: '#64748b' }}>
                           <div style={{ fontSize: '14px', fontWeight: '700', color: '#059669', marginBottom: '4px' }}>
-                            ✓ No Extended Absences (&gt;60m) Recorded for This Shift
+                            ✓ No Absences or Breaks Recorded for This Shift
                           </div>
                           <div style={{ fontSize: '12px', color: '#94a3b8' }}>
-                            All employee breaks during this shift were within the standard 60-minute policy window.
+                            All employee breaks during this shift will appear here with departure and return checkpoints.
                           </div>
                         </td>
                       </tr>
@@ -3473,13 +3508,13 @@ export default function EmployeeRegistry({
                                 gap: '6px',
                                 padding: '4px 10px',
                                 borderRadius: '6px',
-                                backgroundColor: '#fee2e2',
-                                color: '#b91c1c',
+                                backgroundColor: (item.duration_minutes || 0) >= 60 ? '#fee2e2' : '#f0fdf4',
+                                color: (item.duration_minutes || 0) >= 60 ? '#b91c1c' : '#15803d',
                                 fontWeight: '800',
                                 fontFamily: 'var(--font-mono)',
                                 fontSize: '12px'
                               }}>
-                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#dc2626' }} />
+                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: (item.duration_minutes || 0) >= 60 ? '#dc2626' : '#16a34a' }} />
                                 <span>{durStr}</span>
                               </div>
                             </td>
@@ -3494,24 +3529,39 @@ export default function EmployeeRegistry({
                                 backgroundColor: '#f1f5f9',
                                 color: '#475569'
                               }}>
-                                60m (1h Lunch)
+                                60m Policy
                               </span>
                             </td>
 
                             {/* Overstay Exceeded */}
                             <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                              <span style={{
-                                padding: '3px 9px',
-                                borderRadius: '6px',
-                                fontSize: '11px',
-                                fontWeight: '800',
-                                backgroundColor: '#fef2f2',
-                                color: '#dc2626',
-                                border: '1px solid #fca5a5',
-                                fontFamily: 'var(--font-mono)'
-                              }}>
-                                {overstayStr} overstay
-                              </span>
+                              {overstayMins > 0 ? (
+                                <span style={{
+                                  padding: '3px 9px',
+                                  borderRadius: '6px',
+                                  fontSize: '11px',
+                                  fontWeight: '800',
+                                  backgroundColor: '#fef2f2',
+                                  color: '#dc2626',
+                                  border: '1px solid #fca5a5',
+                                  fontFamily: 'var(--font-mono)'
+                                }}>
+                                  {overstayStr} overstay
+                                </span>
+                              ) : (
+                                <span style={{
+                                  padding: '3px 9px',
+                                  borderRadius: '6px',
+                                  fontSize: '11px',
+                                  fontWeight: '700',
+                                  backgroundColor: '#f0fdf4',
+                                  color: '#166534',
+                                  border: '1px solid #bbf7d0',
+                                  fontFamily: 'var(--font-mono)'
+                                }}>
+                                  ✓ Within Policy
+                                </span>
+                              )}
                             </td>
 
                             {/* Status */}
