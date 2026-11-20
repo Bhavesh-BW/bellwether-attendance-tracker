@@ -810,14 +810,15 @@ export default function EmployeeRegistry({
   const filtered = useMemo(() => {
     return sortedVisitors.filter(v => {
       const isEnrolled = Boolean(v.is_enrolled);
-      const isCheckedOut = v.today_status === 'CHECKED OUT' || v.is_checkout_verified;
+      const isCheckedOut = Boolean(v.today_check_in && (v.today_status === 'CHECKED OUT' || v.is_checkout_verified));
+      const isOnDuty = Boolean(v.today_check_in && !isCheckedOut);
       const isBlk = Boolean(v.is_blacklisted || watchlistIds.has(String(v.id).toLowerCase()));
       if (v.today_status === 'NOT SEEN TODAY' && statusFilter !== 'blacklisted' && !search.trim()) return false;
       if (activeSection === 'auto_enroll' && isEnrolled) return false;
       if (statusFilter === 'blacklisted' && !isBlk) return false;
       if (statusFilter === 'enrolled' && !isEnrolled) return false;
       if (statusFilter === 'auto' && isEnrolled) return false;
-      if (statusFilter === 'in_hospital' && (isCheckedOut || v.today_status === 'NOT SEEN TODAY')) return false;
+      if (statusFilter === 'in_hospital' && !isOnDuty) return false;
       if (statusFilter === 'checked_out' && !isCheckedOut) return false;
       if (deptFilter !== 'all' && (v.department || 'General Staff') !== deptFilter) return false;
       if (search.trim()) {
@@ -1764,8 +1765,9 @@ export default function EmployeeRegistry({
                   <tr><td colSpan="9" style={{ padding: '32px', textAlign: 'center', color: '#94a3b8' }}>No employees match the current filter.</td></tr>
                 ) : paged.map((v, idx) => {
                   const isEnrolled = Boolean(v.is_enrolled);
-                  const isCheckedOut = v.today_status === 'CHECKED OUT' || v.is_checkout_verified;
-                  const isNotCheckedIn = !v.today_check_in || v.today_status === 'NOT CHECKED IN' || v.today_status === 'ABSENT';
+                  const isCheckedOut = Boolean(v.today_check_in && (v.today_status === 'CHECKED OUT' || v.is_checkout_verified));
+                  const isOnDuty = Boolean(v.today_check_in && !isCheckedOut);
+                  const isNotCheckedIn = !v.today_check_in;
                   const isBlk = Boolean(v.is_blacklisted || watchlistIds.has(String(v.id).toLowerCase()));
                   const isEditing = editingId === v.id;
                   const displayName = v.name || v.display_name || v.id;
@@ -1977,12 +1979,12 @@ export default function EmployeeRegistry({
                               border: isNotCheckedIn ? '1px solid #e2e8f0' : 'none' }}>
                               {isNotCheckedIn ? '— NOT IN PREMISES' : (isCheckedOut ? '✓ OUT' : '● ON DUTY')}
                             </span>
-                            {isEnrolled && !isNotCheckedIn && (
+                            {isEnrolled && (
                               <button
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  openSingleOverride(v, isCheckedOut ? 'check_in' : 'check_out');
+                                  openSingleOverride(v, (!v.today_check_in || isCheckedOut) ? 'check_in' : 'check_out');
                                 }}
                                 style={{
                                   padding: '3px 8px',
@@ -1990,13 +1992,13 @@ export default function EmployeeRegistry({
                                   fontWeight: '700',
                                   borderRadius: '5px',
                                   border: 'none',
-                                  backgroundColor: isCheckedOut ? '#059669' : '#ea580c',
+                                  backgroundColor: (!v.today_check_in || isCheckedOut) ? '#059669' : '#ea580c',
                                   color: '#fff',
                                   cursor: 'pointer'
                                 }}
-                                title={isCheckedOut ? "Manual Check-In back on duty" : "Manual Check-Out"}
+                                title={!v.today_check_in ? "Manual Check-In" : (isCheckedOut ? "Manual Check-In back on duty" : "Manual Check-Out")}
                               >
-                                {isCheckedOut ? '🟢 In' : '🚪 Out'}
+                                {(!v.today_check_in || isCheckedOut) ? '🟢 In' : '🚪 Out'}
                               </button>
                             )}
                             {isBlk ? (

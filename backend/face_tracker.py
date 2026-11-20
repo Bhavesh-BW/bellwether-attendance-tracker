@@ -2381,7 +2381,12 @@ class FaceTrackerEngine:
                     'last_camera': r[9] if len(r) > 9 else 'main',
                     'previous_camera': r[10] if len(r) > 10 else None,
                     'org_id': r[16] if len(r) > 16 and r[16] else 'bellwether',
-                    'restricted_cameras': restr_cams
+                    'restricted_cameras': restr_cams,
+                    'today_date': get_ist_date_str(),
+                    'today_check_in': None,
+                    'today_check_out': None,
+                    'today_status': 'NOT CHECKED IN',
+                    'is_checkout_verified': False
                 }
                 self.unique_cache.append(vis_obj)
                 self.unique_cache_by_id[vis_id] = vis_obj
@@ -2398,6 +2403,7 @@ class FaceTrackerEngine:
             for emp_id, cin, cout, st, is_chk in cur.fetchall():
                 v = self.unique_cache_by_id.get(emp_id)
                 if v:
+                    v['today_date'] = today_date
                     v['today_check_in'] = cin
                     v['today_check_out'] = cout
                     v['today_status'] = st or ('checked_out' if cout else 'in_hospital')
@@ -2751,6 +2757,20 @@ class FaceTrackerEngine:
         # Always update last sighting detection in memory
         v = self.unique_cache_by_id.get(employee_id)
         if v:
+            # Check for date rollover in memory cache for this employee
+            if v.get('today_date') != date_str or (v.get('today_check_in') and not str(v['today_check_in']).startswith(date_str)):
+                v['today_date'] = date_str
+                v['today_check_in'] = None
+                v['today_check_in_camera'] = None
+                v['today_check_in_camera_name'] = None
+                v['today_check_out'] = None
+                v['today_check_out_camera'] = None
+                v['today_check_out_camera_name'] = None
+                v['today_status'] = 'NOT CHECKED IN'
+                v['is_checkout_verified'] = False
+                v['last_in_time'] = None
+                v['exit_time_iso'] = None
+
             v['last_seen'] = timestamp_iso
             v['last_camera'] = camera_id
             v['last_camera_name'] = cam_name
@@ -3412,11 +3432,11 @@ class FaceTrackerEngine:
             })
 
         today_str = get_ist_date_str()
-        today_rec = next((dr for dr in daily_records if dr['date'] == today_str), (daily_records[0] if daily_records else None))
+        today_rec = next((dr for dr in daily_records if dr['date'] == today_str), None)
         today_status = today_rec['status'] if today_rec else 'Absent'
         today_duration = today_rec['duration_str'] if today_rec else '0h 00m'
         today_checkout_verified = today_rec['is_checkout_verified'] if today_rec else False
-        today_in_count = today_rec.get('in_count', 1) if today_rec else 0
+        today_in_count = today_rec.get('in_count', 0) if today_rec else 0
         today_out_count = today_rec.get('out_count', 0) if today_rec else 0
         today_total_mov = today_rec.get('total_movements', 0) if today_rec else 0
 
@@ -5630,39 +5650,82 @@ class FaceTrackerEngine:
             today_status = 'NOT CHECKED IN'
             is_checkout_verified = False
 
-            if stats_30d and stats_30d.get('daily_records'):
-                first_rec = stats_30d['daily_records'][0]
-                today_str_check = get_ist_now().strftime('%Y-%m-%d')
-                if first_rec['date'] == today_str_check:
-                    if first_rec.get('check_in_time'):
-                        today_check_in = first_rec['check_in_time']
-                        today_check_in_raw = first_rec['check_in_time']
-                        today_check_in_cam = first_rec.get('check_in_camera')
-                    if first_rec.get('check_out_time'):
-                        today_check_out = first_rec['check_out_time']
-                        today_check_out_raw = first_rec['check_out_time']
-                        today_check_out_cam = first_rec.get('check_out_camera')
-                    today_duration_mins = self.get_today_duty_minutes(vis_id, today_str_check)
-                    today_status = 'CHECKED OUT' if str(first_rec.get('status', '')).lower() in ('checked out', 'checked_out') else 'IN HOSPITAL'
-                    is_checkout_verified = bool(first_rec.get('is_checkout_verified'))
+            today_str_check = get_ist_now().strftime('%Y-%m-%d')
+            today_rec = stats_30d.get('today_record') if stats_30d else None
+            if today_rec and today_rec.get('date') == today_str_check:
+                if today_rec.get('check_in_time'):
+                    today_check_in = today_rec['check_in_time']
+                    today_check_in_raw = today_rec['check_in_time']
+                    today_check_in_cam = today_rec.get('check_in_camera')
+                if today_rec.get('check_out_time'):
+                    today_check_out = today_rec['check_out_time']
+                    today_check_out_raw = today_rec['check_out_time']
+                    today_check_out_cam = today_rec.get('check_out_camera')
+                today_duration_mins = self.get_today_duty_minutes(vis_id, today_str_check)
+                today_status = 'CHECKED OUT' if str(today_rec.get('status', '')).lower() in ('checked out', 'checked_out') else 'IN HOSPITAL'
+                is_checkout_verified = bool(today_rec.get('is_checkout_verified'))
 
             if v_mem:
-                if v_mem.get('today_status') == 'checked_out':
+                mem_cin = v_mem.get('today_check_in')
+                mem_cout = v_mem.get('today_check_out')
+
+                # Purge stale memory cache from previous days
+                if mem_cin and not str(mem_cin).startswith(today_str_check):
+                    v_mem['today_check_in'] = None
+                    v_mem['today_check_out'] = None
+                    v_mem['today_status'] = 'NOT CHECKED IN'
+                    v_mem['is_checkout_verified'] = False
+                    v_mem['today_date'] = today_str_check
+                    mem_cin = None
+                    mem_cout = None
+
+                if mem_cout and not str(mem_cout).startswith(today_str_check):
+                    v_mem['today_check_out'] = None
+                    mem_cout = None
+
+                # Only apply in-memory live updates if they actually occurred TODAY
+                if mem_cin and str(mem_cin).startswith(today_str_check):
+                    today_check_in = mem_cin
+                    today_check_in_raw = mem_cin
+                    today_check_in_cam = v_mem.get('today_check_in_camera')
+                    if not today_status or today_status == 'NOT CHECKED IN':
+                        today_status = 'IN HOSPITAL'
+
+                if mem_cout and str(mem_cout).startswith(today_str_check):
+                    today_check_out = mem_cout
+                    today_check_out_raw = mem_cout
+                    today_check_out_cam = v_mem.get('today_check_out_camera')
                     today_status = 'CHECKED OUT'
                     is_checkout_verified = True
-                elif v_mem.get('today_status') == 'in_hospital':
+
+                if v_mem.get('today_status') == 'checked_out' and (today_check_out or today_check_in):
+                    today_status = 'CHECKED OUT'
+                    is_checkout_verified = True
+                elif v_mem.get('today_status') == 'in_hospital' and today_check_in:
                     today_status = 'IN HOSPITAL'
                     is_checkout_verified = False
 
-                if v_mem.get('today_check_in'):
-                    today_check_in = v_mem['today_check_in']
-                    today_check_in_raw = v_mem['today_check_in']
-                    today_check_in_cam = v_mem.get('today_check_in_camera')
-
-                if v_mem.get('today_check_out'):
-                    today_check_out = v_mem['today_check_out']
-                    today_check_out_raw = v_mem['today_check_out']
-                    today_check_out_cam = v_mem.get('today_check_out_camera')
+            # If employee has not checked in today at all, enforce strictly clean absent state
+            if not today_check_in:
+                today_check_in = None
+                today_check_in_raw = None
+                today_check_in_cam = None
+                today_check_out = None
+                today_check_out_raw = None
+                today_check_out_cam = None
+                today_duration_mins = 0
+                today_status = 'NOT CHECKED IN'
+                is_checkout_verified = False
+                today_dur_str = "—"
+                working_str = "—"
+                break_str = "0m"
+                prod_pct = 0.0
+            else:
+                th, tm = divmod(today_duration_mins, 60)
+                today_dur_str = f"{th}h {tm:02d}m" if today_duration_mins > 0 else "< 15m"
+                working_str = stats_30d.get('today_working_str', today_dur_str) if (stats_30d and stats_30d.get('today_working_str') and stats_30d.get('today_working_str') != '0h 00m') else today_dur_str
+                break_str = stats_30d.get('today_break_str', '0m') if stats_30d else '0m'
+                prod_pct = stats_30d.get('today_productivity_pct', 100.0) if stats_30d else 100.0
 
             now_ist = get_ist_now()
             is_shift_ended = bool(today_status == 'CHECKED OUT' or is_checkout_verified)
@@ -5699,12 +5762,6 @@ class FaceTrackerEngine:
                     today_out_disp = datetime.fromisoformat(today_check_out).strftime("%I:%M %p")
                 except Exception:
                     today_out_disp = today_check_out.split('T')[1][:5] if 'T' in today_check_out else today_check_out
-
-            th, tm = divmod(today_duration_mins, 60)
-            if not today_check_in:
-                today_dur_str = "—"
-            else:
-                today_dur_str = f"{th}h {tm:02d}m" if today_duration_mins > 0 else "< 15m"
 
             rows.append({
                 'id': vis_id,
@@ -5758,13 +5815,13 @@ class FaceTrackerEngine:
                 'today_check_out_raw': today_check_out_raw,
                 'today_duration_mins': today_duration_mins,
                 'today_duration_str': today_dur_str,
-                'working_minutes': stats_30d.get('today_record', {}).get('working_minutes', today_duration_mins) if stats_30d else today_duration_mins,
-                'working_str': stats_30d.get('today_working_str', today_dur_str) if stats_30d else today_dur_str,
-                'break_minutes': stats_30d.get('today_record', {}).get('break_minutes', 0) if stats_30d else 0,
-                'break_str': stats_30d.get('today_break_str', '0h 00m') if stats_30d else '0h 00m',
-                'shift_span_minutes': stats_30d.get('today_record', {}).get('shift_span_minutes', 0) if stats_30d else 0,
-                'shift_span_str': stats_30d.get('today_record', {}).get('shift_span_str', '0h 00m') if stats_30d else '0h 00m',
-                'productivity_pct': stats_30d.get('today_productivity_pct', 0.0) if stats_30d else 0.0,
+                'working_minutes': today_duration_mins if today_check_in else 0,
+                'working_str': working_str,
+                'break_minutes': today_rec.get('break_minutes', 0) if (today_check_in and today_rec) else 0,
+                'break_str': break_str,
+                'shift_span_minutes': today_rec.get('shift_span_minutes', 0) if (today_check_in and today_rec) else 0,
+                'shift_span_str': today_rec.get('shift_span_str', '0h 00m') if (today_check_in and today_rec) else '0h 00m',
+                'productivity_pct': prod_pct,
                 'days_present_30d': stats_30d.get('days_present') if stats_30d else 0,
                 'avg_time_spent_30d': stats_30d.get('avg_daily_time_str') if stats_30d else '0h 00m',
                 'attendance_pct_30d': stats_30d.get('attendance_pct') if stats_30d else 0.0,
