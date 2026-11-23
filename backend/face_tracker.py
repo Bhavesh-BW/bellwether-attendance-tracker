@@ -166,9 +166,10 @@ def get_stream_cert_fingerprint(rtsp_url: str):
 
 def sync_camera_to_mediamtx(cam_id: str, rtsp_url: str):
     """Programmatically register an RTSP camera stream in MediaMTX as a WebRTC endpoint.
-    Uses MediaMTX Control API on port 32197 (server) or 9997 (local)."""
+    Uses MediaMTX Control API on port 32197 (server with auth) or 9997 (local)."""
     import urllib.request
     import json
+    import base64
     payload = {
         'source': rtsp_url,
         'sourceOnDemand': True,
@@ -179,10 +180,14 @@ def sync_camera_to_mediamtx(cam_id: str, rtsp_url: str):
         payload['sourceFingerprint'] = fp
 
     data = json.dumps(payload).encode('utf-8')
+    auth_b64 = base64.b64encode(b'mtxapi:Xk9vQ2mRt7LwPz4NhB8sYdJ3').decode()
     for port in [32197, 9997]:
+        headers = {'Content-Type': 'application/json'}
+        if port == 32197:
+            headers['Authorization'] = f'Basic {auth_b64}'
         try:
             req = urllib.request.Request(f'http://127.0.0.1:{port}/v3/config/paths/add/{cam_id}',
-                                         data=data, headers={'Content-Type': 'application/json'})
+                                         data=data, headers=headers)
             with urllib.request.urlopen(req, timeout=1.5) as resp:
                 if resp.status in (200, 201):
                     return True
@@ -190,7 +195,7 @@ def sync_camera_to_mediamtx(cam_id: str, rtsp_url: str):
             if e.code == 400: # Path exists, replace it
                 try:
                     req_rep = urllib.request.Request(f'http://127.0.0.1:{port}/v3/config/paths/replace/{cam_id}',
-                                                     data=data, headers={'Content-Type': 'application/json'})
+                                                     data=data, headers=headers)
                     with urllib.request.urlopen(req_rep, timeout=1.5) as resp_rep:
                         if resp_rep.status in (200, 201):
                             return True
@@ -203,9 +208,14 @@ def sync_camera_to_mediamtx(cam_id: str, rtsp_url: str):
 def remove_camera_from_mediamtx(cam_id: str):
     """Programmatically delete an RTSP camera stream from MediaMTX."""
     import urllib.request
+    import base64
+    auth_b64 = base64.b64encode(b'mtxapi:Xk9vQ2mRt7LwPz4NhB8sYdJ3').decode()
     for port in [32197, 9997]:
+        headers = {}
+        if port == 32197:
+            headers['Authorization'] = f'Basic {auth_b64}'
         try:
-            req = urllib.request.Request(f'http://127.0.0.1:{port}/v3/config/paths/delete/{cam_id}', method='DELETE')
+            req = urllib.request.Request(f'http://127.0.0.1:{port}/v3/config/paths/delete/{cam_id}', headers=headers, method='DELETE')
             with urllib.request.urlopen(req, timeout=1.5):
                 return True
         except Exception:
@@ -6557,6 +6567,7 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
                 c_copy['fps'] = pipe.fps if pipe else 0.0
                 c_copy['error_msg'] = pipe.error_msg if pipe else None
                 c_copy['webrtc_path'] = c['id']
+                c_copy['webrtc_port'] = 32089 if (os.name != 'nt' and os.path.exists('/etc/systemd')) else 8889
                 cams.append(c_copy)
             active_cam = tracker.active_camera
             if active_cam not in [c['id'] for c in org_cams]:

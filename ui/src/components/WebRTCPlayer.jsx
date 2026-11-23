@@ -21,9 +21,12 @@ export default function WebRTCPlayer({
     setStatus('connecting');
     setErrorMessage('');
 
-    // Determine host: connects to the same host that served the page
+    // Determine host & WebRTC WHEP port:
+    // When served from remote server (port 31030 or hostname 124.123.89.162), MediaMTX WHEP runs on NodePort 32089.
+    // When run locally, MediaMTX WHEP runs on port 8889.
     const host = window.location.hostname || 'localhost';
-    const whepUrl = `http://${host}:8889/${targetPath}/whep`;
+    const targetPort = cameraObj?.webrtc_port || (window.location.port === '31030' || host === '124.123.89.162' ? 32089 : 8889);
+    const whepUrl = `http://${host}:${targetPort}/${targetPath}/whep`;
 
     try {
       readerRef.current = new MediaMTXWebRTCReader({
