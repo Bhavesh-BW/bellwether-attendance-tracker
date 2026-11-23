@@ -4,6 +4,8 @@ import { MediaMTXWebRTCReader } from '../utils/webrtcReader';
 export default function WebRTCPlayer({
   streamPath,
   cameraObj,
+  cameraId,
+  hudEnabled = true,
   onClick,
   title = '',
   style = {}
@@ -14,16 +16,16 @@ export default function WebRTCPlayer({
   const [errorMessage, setErrorMessage] = useState('');
 
   useEffect(() => {
-    // If no stream path provided, stay idle
-    const targetPath = streamPath || cameraObj?.webrtc_path || cameraObj?.id;
-    if (!targetPath) return;
+    const rawPath = streamPath || cameraObj?.webrtc_path || cameraObj?.id;
+    if (!rawPath) return;
+
+    // Annotated WebRTC: When hudEnabled is on, stream the 100% frame-locked AI HUD stream ({path}_hud).
+    // When hudEnabled is off, stream the clean raw camera feed ({path}).
+    const targetPath = hudEnabled ? `${rawPath}_hud` : rawPath;
 
     setStatus('connecting');
     setErrorMessage('');
 
-    // Determine host & WebRTC WHEP port:
-    // When served from remote server (port 31030 or hostname 124.123.89.162), MediaMTX WHEP runs on NodePort 32089.
-    // When run locally, MediaMTX WHEP runs on port 8889.
     const host = window.location.hostname || 'localhost';
     const targetPort = cameraObj?.webrtc_port || (window.location.port === '31030' || host === '124.123.89.162' ? 32089 : 8889);
     const whepUrl = `http://${host}:${targetPort}/${targetPath}/whep`;
@@ -58,7 +60,7 @@ export default function WebRTCPlayer({
         readerRef.current = null;
       }
     };
-  }, [streamPath, cameraObj?.id, cameraObj?.webrtc_path]);
+  }, [streamPath, cameraObj?.id, cameraObj?.webrtc_path, hudEnabled]);
 
   return (
     <div
@@ -77,12 +79,14 @@ export default function WebRTCPlayer({
         ...style
       }}
     >
-      {/* Native WebRTC Video Element (Hardware GPU Decoded) */}
+      {/* 100% Hardware GPU Decoded Native WebRTC Video Element */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
+        onPlay={() => setStatus('playing')}
+        onLoadedMetadata={() => setStatus('playing')}
         style={{
           width: '100%',
           height: '100%',
@@ -96,6 +100,12 @@ export default function WebRTCPlayer({
       {status === 'connecting' && (
         <div
           style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            backgroundColor: 'rgba(7, 10, 19, 0.75)',
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
@@ -103,7 +113,8 @@ export default function WebRTCPlayer({
             gap: '12px',
             color: '#38bdf8',
             fontSize: '13px',
-            fontWeight: '600'
+            fontWeight: '600',
+            zIndex: 15
           }}
         >
           <div
@@ -116,7 +127,9 @@ export default function WebRTCPlayer({
               animation: 'spin 0.8s linear infinite'
             }}
           />
-          <span style={{ color: '#94a3b8', fontSize: '12px' }}>Connecting Ultra-Low Latency WebRTC...</span>
+          <span style={{ color: '#94a3b8', fontSize: '12px' }}>
+            {hudEnabled ? 'Connecting Frame-Locked AI WebRTC Stream...' : 'Connecting Ultra-Low Latency WebRTC...'}
+          </span>
         </div>
       )}
 
@@ -124,6 +137,12 @@ export default function WebRTCPlayer({
       {status === 'error' && (
         <div
           style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            backgroundColor: '#070a13',
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
@@ -131,7 +150,8 @@ export default function WebRTCPlayer({
             gap: '8px',
             color: '#ef4444',
             padding: '16px',
-            textAlign: 'center'
+            textAlign: 'center',
+            zIndex: 15
           }}
         >
           <div style={{ fontSize: '28px' }}>📡</div>

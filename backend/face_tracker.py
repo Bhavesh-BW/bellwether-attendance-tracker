@@ -46,6 +46,17 @@ def _check_ffmpeg_cuda_hwaccel():
 
 FFMPEG_CUDA_HWACCEL = _check_ffmpeg_cuda_hwaccel()
 
+def _check_ffmpeg_nvenc():
+    if not FFMPEG_BIN:
+        return False
+    try:
+        res = subprocess.run([FFMPEG_BIN, "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2)
+        return b'h264_nvenc' in res.stdout.lower()
+    except Exception:
+        return False
+
+FFMPEG_NVENC_AVAILABLE = _check_ffmpeg_nvenc()
+
 # ── IST Timezone Configuration (+05:30) ─────────────────────────────────────
 IST = timezone(timedelta(hours=5, minutes=30), name='IST')
 
@@ -509,6 +520,9 @@ class CameraStreamPipeline:
         self.recently_closed_tracks = collections.deque(maxlen=25)
         self.next_track_id = 1
         self.proc = None
+        self.hud_proc = None
+        self.hud_boxes = []
+        self.hud_version = 0
 
         det_path = str(MODELS / 'face_detection_yunet_2023mar.onnx')
         self.detector = cv2.FaceDetectorYN_create(det_path, '', (720, 405), 0.45, 0.3, 1000) if os.path.exists(det_path) else None
@@ -530,6 +544,16 @@ class CameraStreamPipeline:
                 self.proc.terminate()
             except Exception:
                 pass
+        if hasattr(self, 'hud_proc') and self.hud_proc:
+            try:
+                self.hud_proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                self.hud_proc.terminate()
+            except Exception:
+                pass
+            self.hud_proc = None
         with self.lock:
             self.lock.notify_all()
 
@@ -931,9 +955,9 @@ class CameraStreamPipeline:
         now_iso = get_ist_iso()
         now_epoch = time.time()
 
-        # Real-time DNN face detector with 8 FPS decimation (saves 68% CPU while keeping full 720p resolution)
+        # Real-time DNN face detector with 12 FPS stable decimation
         last_det_ts = getattr(self, '_last_det_ts', 0)
-        should_detect = (now - last_det_ts) >= 0.12 or getattr(self, '_cached_faces', None) is None
+        should_detect = (now - last_det_ts) >= 0.08 or getattr(self, '_cached_faces', None) is None
         if should_detect:
             faces = self.engine._detect_faces(frame, detector=getattr(self, 'detector', None))
             self._cached_faces = faces
@@ -951,10 +975,10 @@ class CameraStreamPipeline:
         for face in faces:
             x, y, w, h = [int(v) for v in face[:4]]
             det_score = float(face[-1])
-            min_det = 0.45 if is_exit_camera else 0.48
-            # Reject tiny doorway silhouettes: must be close enough for clear biometrics & human verification
-            min_w = 26 if is_exit_camera else 28
-            min_h = 30 if is_exit_camera else 34
+            min_det = 0.52 if is_exit_camera else 0.52
+            # Reject tiny silhouettes or false positive bag contours: must be clear human faces
+            min_w = 30 if is_exit_camera else 30
+            min_h = 34 if is_exit_camera else 34
             if det_score < min_det or w < min_w or h < min_h:
                 continue
 
@@ -1009,7 +1033,7 @@ class CameraStreamPipeline:
                     best_track_id = tid
 
             if best_track_id is None:
-                min_dist = 50.0  # Spatial proximity for walking continuity
+                min_dist = 85.0  # Spatial proximity for fast walking continuity
                 for tid, trk in self.active_tracks.items():
                     if tid in matched_track_ids:
                         continue
@@ -1025,11 +1049,11 @@ class CameraStreamPipeline:
                 track_id = best_track_id
                 trk = self.active_tracks[track_id]
                 px, py, pw, ph = trk['bbox']
-                # Smooth exponential follow-up (0.90 current + 0.10 previous) for silky smooth bboxes
-                sx = int(0.90 * x + 0.10 * px)
-                sy = int(0.90 * y + 0.10 * py)
-                sw = int(0.90 * w + 0.10 * pw)
-                sh = int(0.90 * h + 0.10 * ph)
+                # Instant responsive follow-up (0.95 current + 0.05 previous) eliminates walking lag
+                sx = int(0.95 * x + 0.05 * px)
+                sy = int(0.95 * y + 0.05 * py)
+                sw = int(0.95 * w + 0.05 * pw)
+                sh = int(0.95 * h + 0.05 * ph)
                 trk['bbox'] = (sx, sy, sw, sh)
                 trk['last_seen'] = now
                 trk['missed'] = 0
@@ -1736,6 +1760,8 @@ class CameraStreamPipeline:
                         self.engine.unique_cache = [v for v in self.engine.unique_cache if v.get('id') != p_vid]
 
         # Render Bounding Boxes & HUD from Active Tracks (smooth persistent follow-up)
+        current_hud_boxes = []
+        h_ann, w_ann = annotated.shape[:2]
         for tid, trk in self.active_tracks.items():
             if trk.get('missed', 0) > 1:
                 continue
@@ -1824,12 +1850,34 @@ class CameraStreamPipeline:
             cv2.rectangle(annotated, (bx, tag_y - th - 5), (bx + tw + 10, tag_y + 3), tag_bg, -1)
             cv2.putText(annotated, tag, (bx + 5, tag_y - 2), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
+            # Record normalized bounding box for client-side WebRTC overlay
+            current_hud_boxes.append({
+                'id': tid,
+                'x': round(bx / max(w_ann, 1), 4),
+                'y': round(by / max(h_ann, 1), 4),
+                'w': round(bw / max(w_ann, 1), 4),
+                'h': round(bh / max(h_ann, 1), 4),
+                'tag': tag,
+                'color': f"rgb({color[2]},{color[1]},{color[0]})",
+                'tag_bg': f"rgb({tag_bg[2]},{tag_bg[1]},{tag_bg[0]})",
+                'is_blacklisted': bool(t_blacklisted),
+                'is_intrusion': bool(is_zone_intrusion),
+                'visitor_id': t_vid
+            })
+
+        with self.lock:
+            self.hud_boxes = current_hud_boxes
+            self.hud_version = getattr(self, 'hud_version', 0) + 1
+
         # Ultra-smooth web delivery: downscale to 720p (1280x720) for 65%+ bandwidth drop and instant browser decode
         h_ann, w_ann = annotated.shape[:2]
-        if w_ann > 1280:
+        if w_ann > 1280 or h_ann > 720:
             display_frame = cv2.resize(annotated, (1280, 720), interpolation=cv2.INTER_LINEAR)
         else:
             display_frame = annotated
+
+        # Publish AI-annotated frames directly to MediaMTX for 100% frame-locked WebRTC streaming
+        self._push_annotated_to_mediamtx(display_frame)
 
         ok, jpeg = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 62])
         if ok:
@@ -1842,6 +1890,75 @@ class CameraStreamPipeline:
                     self.fps = round(self.fps * 0.8 + fps * 0.2, 1)
                 self.last_frame_ts = pub_time
                 self.lock.notify_all()
+
+    def _push_annotated_to_mediamtx(self, frame):
+        """Pushes AI-annotated frame (with bboxes, tags, identity pills) directly to MediaMTX via RTSP."""
+        if not FFMPEG_BIN or not getattr(self, 'is_rtsp_connected', False):
+            return
+        h, w = frame.shape[:2]
+        if self.hud_proc is None or self.hud_proc.poll() is not None:
+            is_server = os.environ.get('PORT') == '31030' or not os.name == 'nt'
+            target_port = 31554 if is_server else 8554
+            rtsp_target = f"rtsp://127.0.0.1:{target_port}/{self.camera_id}_hud"
+
+            if FFMPEG_NVENC_AVAILABLE:
+                # High-speed hardware GPU encoding on server (GPU 1: RTX 5060 Ti, sub-2ms hardware encode)
+                encoder_cmd = [
+                    "-c:v", "h264_nvenc",
+                    "-gpu", "1",
+                    "-preset", "p1",
+                    "-tune", "ull",
+                    "-pix_fmt", "yuv420p",
+                    "-g", "25",
+                    "-b:v", "2000k",
+                    "-maxrate", "2500k",
+                    "-bufsize", "1000k"
+                ]
+            else:
+                encoder_cmd = [
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-tune", "zerolatency",
+                    "-pix_fmt", "yuv420p",
+                    "-g", "25",
+                    "-b:v", "1800k",
+                    "-maxrate", "2200k",
+                    "-bufsize", "900k"
+                ]
+
+            cmd = [
+                FFMPEG_BIN,
+                "-y",
+                "-f", "rawvideo",
+                "-pix_fmt", "bgr24",
+                "-s", f"{w}x{h}",
+                "-r", "25",
+                "-i", "pipe:0"
+            ] + encoder_cmd + [
+                "-f", "rtsp",
+                "-rtsp_transport", "tcp",
+                rtsp_target
+            ]
+            try:
+                self.hud_proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=w * h * 3 * 2
+                )
+            except Exception as e:
+                self.hud_proc = None
+                return
+
+        try:
+            self.hud_proc.stdin.write(frame.tobytes())
+        except (BrokenPipeError, OSError):
+            try:
+                self.hud_proc.terminate()
+            except Exception:
+                pass
+            self.hud_proc = None
 
 
 
@@ -1971,6 +2088,13 @@ class FaceTrackerEngine:
     def get_pipeline(self, camera_id=None):
         if camera_id and camera_id in self.pipelines:
             return self.pipelines[camera_id]
+        if camera_id:
+            for p in self.pipelines.values():
+                if getattr(p, 'camera_id', None) == camera_id or getattr(p, 'name', None) == camera_id:
+                    return p
+                c_conf = CAMERA_SOURCES.get(getattr(p, 'camera_id', ''), {})
+                if c_conf.get('webrtc_path') == camera_id:
+                    return p
         if self.active_camera in self.pipelines:
             return self.pipelines[self.active_camera]
         if self.pipelines:
@@ -6627,7 +6751,62 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
                 self.send_json(503, {'error': f'No frame available for camera {cam_id}'})
             return
 
-        # MJPEG Video Stream (Supports multi-camera ?camera=<cam_id>)
+        # Real-time HUD Bounding Box Metadata (for WebRTC client-side overlay)
+        if path == '/api/stream/hud':
+            params = urllib.parse.parse_qs(parsed.query)
+            cam_id = params.get('camera', [tracker.active_camera])[0]
+            pipe = tracker.get_pipeline(cam_id)
+            if not pipe:
+                return self.send_json(404, {'error': f'Camera {cam_id} not found'})
+            with pipe.lock:
+                boxes = list(getattr(pipe, 'hud_boxes', []))
+                fps = pipe.fps
+                is_connected = pipe.is_rtsp_connected
+                ver = getattr(pipe, 'hud_version', 0)
+            return self.send_json(200, {
+                'camera': cam_id,
+                'boxes': boxes,
+                'fps': fps,
+                'is_connected': is_connected,
+                'version': ver
+            })
+
+        if path == '/api/stream/hud/sse':
+            params = urllib.parse.parse_qs(parsed.query)
+            cam_id = params.get('camera', [tracker.active_camera])[0]
+            pipe = tracker.get_pipeline(cam_id)
+            if not pipe:
+                return self.send_json(404, {'error': f'Camera {cam_id} not found'})
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('Connection', 'keep-alive')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+
+            last_version = -1
+            try:
+                self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+                while tracker.running and pipe.running:
+                    with pipe.lock:
+                        pipe.lock.wait_for(
+                            lambda: (not tracker.running) or (not pipe.running) or getattr(pipe, 'hud_version', 0) != last_version,
+                            timeout=0.05
+                        )
+                        ver = getattr(pipe, 'hud_version', 0)
+                        boxes = list(getattr(pipe, 'hud_boxes', []))
+                    if ver != last_version:
+                        last_version = ver
+                        msg = f"data: {json.dumps(boxes)}\n\n".encode('utf-8')
+                        self.wfile.write(msg)
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, ConnectionError, OSError):
+                return
+            except Exception:
+                return
+            return
         if path in ('/stream.mjpg', '/api/stream/feed', '/api/stream'):
             params = urllib.parse.parse_qs(parsed.query)
             cam_id = params.get('camera', [tracker.active_camera])[0]

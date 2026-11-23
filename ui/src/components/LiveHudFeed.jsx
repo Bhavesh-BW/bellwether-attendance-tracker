@@ -1077,6 +1077,8 @@ export default function LiveHudFeed({
               <WebRTCPlayer
                 streamPath={slot1Obj?.webrtc_path || slot1Camera}
                 cameraObj={slot1Obj}
+                cameraId={slot1Camera}
+                hudEnabled={hudEnabled}
                 title={quickBlacklistMode ? "Click directly on any face in the feed to toggle blacklist" : ""}
               />
               {clickEffect && clickEffect.camId === slot1Camera && (
@@ -1281,6 +1283,8 @@ export default function LiveHudFeed({
               <WebRTCPlayer
                 streamPath={slot2Obj?.webrtc_path || slot2Camera}
                 cameraObj={slot2Obj}
+                cameraId={slot2Camera}
+                hudEnabled={hudEnabled}
                 title={quickBlacklistMode ? "Click directly on any face in the feed to toggle blacklist" : ""}
               />
               {clickEffect && clickEffect.camId === slot2Camera && (
@@ -1494,6 +1498,8 @@ export default function LiveHudFeed({
             <WebRTCPlayer
               streamPath={focusCamObj?.webrtc_path || activeCamera}
               cameraObj={focusCamObj}
+              cameraId={activeCamera}
+              hudEnabled={hudEnabled}
               title={quickBlacklistMode ? "Click directly on any face in the feed to toggle blacklist" : ""}
             />
             {clickEffect && clickEffect.camId === activeCamera && (
