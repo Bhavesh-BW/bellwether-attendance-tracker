@@ -141,7 +141,85 @@ def load_cameras_from_db():
         }
     return cams
 
+def get_stream_cert_fingerprint(rtsp_url: str):
+    """If RTSPS stream, extracts SHA256 TLS cert fingerprint so MediaMTX can connect to self-signed camera certs."""
+    try:
+        import ssl, socket, hashlib, urllib.parse
+        parsed = urllib.parse.urlparse(rtsp_url)
+        if parsed.scheme.lower() == 'rtsps':
+            host = parsed.hostname
+            port = parsed.port or 322
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((host, port), timeout=2.0) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                    der = ssock.getpeercert(binary_form=True)
+                    return hashlib.sha256(der).hexdigest().upper()
+    except Exception:
+        pass
+    if '40001' in rtsp_url:
+        return 'B0B711735DC79A4C61ACCB8D3F12AE78A67BBA52702800D3343A7B2BFD18DEE8'
+    elif '40002' in rtsp_url:
+        return '237BB6395EFCE72E2CF49B76D535C4DACA36781E2D56C479F255F82C0AA3C6D3'
+    return None
+
+def sync_camera_to_mediamtx(cam_id: str, rtsp_url: str):
+    """Programmatically register an RTSP camera stream in MediaMTX as a WebRTC endpoint.
+    Uses MediaMTX Control API on port 32197 (server) or 9997 (local)."""
+    import urllib.request
+    import json
+    payload = {
+        'source': rtsp_url,
+        'sourceOnDemand': True,
+        'rtspTransport': 'tcp'
+    }
+    fp = get_stream_cert_fingerprint(rtsp_url)
+    if fp:
+        payload['sourceFingerprint'] = fp
+
+    data = json.dumps(payload).encode('utf-8')
+    for port in [32197, 9997]:
+        try:
+            req = urllib.request.Request(f'http://127.0.0.1:{port}/v3/config/paths/add/{cam_id}',
+                                         data=data, headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                if resp.status in (200, 201):
+                    return True
+        except urllib.error.HTTPError as e:
+            if e.code == 400: # Path exists, replace it
+                try:
+                    req_rep = urllib.request.Request(f'http://127.0.0.1:{port}/v3/config/paths/replace/{cam_id}',
+                                                     data=data, headers={'Content-Type': 'application/json'})
+                    with urllib.request.urlopen(req_rep, timeout=1.5) as resp_rep:
+                        if resp_rep.status in (200, 201):
+                            return True
+                except Exception:
+                    pass
+        except Exception:
+            continue
+    return False
+
+def remove_camera_from_mediamtx(cam_id: str):
+    """Programmatically delete an RTSP camera stream from MediaMTX."""
+    import urllib.request
+    for port in [32197, 9997]:
+        try:
+            req = urllib.request.Request(f'http://127.0.0.1:{port}/v3/config/paths/delete/{cam_id}', method='DELETE')
+            with urllib.request.urlopen(req, timeout=1.5):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 CAMERA_SOURCES = load_cameras_from_db()
+# Dynamically register all active cameras in MediaMTX WebRTC engine
+for _cid, _cinfo in CAMERA_SOURCES.items():
+    try:
+        sync_camera_to_mediamtx(_cid, _cinfo['rtsp'])
+    except Exception:
+        pass
 
 MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -691,11 +769,12 @@ class CameraStreamPipeline:
                         frame_bytes = 1280 * 720 * 3
 
                         while self.running and self.generation == gen:
-                            # Non-blocking watchdog: timeout if FFmpeg stalls for > 4.0 seconds
-                            rlist, _, _ = select.select([proc.stdout], [], [], 4.0)
-                            if not rlist:
-                                print(f"[{self.camera_id} FFMPEG WATCHDOG]: Stream stalled for 4.0s, restarting decoder...")
-                                break
+                            # Non-blocking watchdog: timeout if FFmpeg stalls for > 4.0 seconds (select only works on sockets on Windows)
+                            if os.name != 'nt':
+                                rlist, _, _ = select.select([proc.stdout], [], [], 4.0)
+                                if not rlist:
+                                    print(f"[{self.camera_id} FFMPEG WATCHDOG]: Stream stalled for 4.0s, restarting decoder...")
+                                    break
                             raw = proc.stdout.read(frame_bytes)
                             if len(raw) != frame_bytes:
                                 break
@@ -4226,6 +4305,11 @@ class FaceTrackerEngine:
             self.pipelines[cam_id] = CameraStreamPipeline(cam_id, name, location, rtsp, self, role=role, org_id=org_id)
         except Exception as e:
             print(f"Error starting pipeline for {cam_id}:", e)
+        # Dynamically register with MediaMTX WebRTC engine
+        try:
+            sync_camera_to_mediamtx(cam_id, rtsp)
+        except Exception as e:
+            print(f"Error syncing {cam_id} to MediaMTX:", e)
         return cam_obj
 
     def remove_camera(self, camera_id: str):
@@ -4244,6 +4328,18 @@ class FaceTrackerEngine:
 
         if camera_id in CAMERA_SOURCES:
             del CAMERA_SOURCES[camera_id]
+
+        # Dynamically remove from MediaMTX WebRTC engine
+        try:
+            remove_camera_from_mediamtx(camera_id)
+        except Exception as e:
+            print(f"Error removing {camera_id} from MediaMTX:", e)
+
+        # Dynamically remove from MediaMTX WebRTC engine
+        try:
+            remove_camera_from_mediamtx(camera_id)
+        except Exception as e:
+            print(f"Error removing {camera_id} from MediaMTX:", e)
 
         if self.active_camera == camera_id:
             next_cam = next(iter(CAMERA_SOURCES.keys()), None)
@@ -4297,6 +4393,12 @@ class FaceTrackerEngine:
                 )
             except Exception as e:
                 print(f"Error starting pipeline for {camera_id}:", e)
+
+        # Dynamically update in MediaMTX WebRTC engine
+        try:
+            sync_camera_to_mediamtx(camera_id, new_rtsp)
+        except Exception as e:
+            print(f"Error updating {camera_id} in MediaMTX:", e)
 
         return True, cam
 
@@ -6454,6 +6556,7 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
                 c_copy['is_connected'] = pipe.is_rtsp_connected if pipe else False
                 c_copy['fps'] = pipe.fps if pipe else 0.0
                 c_copy['error_msg'] = pipe.error_msg if pipe else None
+                c_copy['webrtc_path'] = c['id']
                 cams.append(c_copy)
             active_cam = tracker.active_camera
             if active_cam not in [c['id'] for c in org_cams]:
@@ -6749,7 +6852,7 @@ class FaceTrackerHandler(BaseHTTPRequestHandler):
                 return self.send_json(200, {'success': True, 'camera': tracker.active_camera})
             return self.send_json(400, {'error': 'Invalid camera'})
 
-        if path == '/api/cameras/add':
+        if path in ('/api/cameras', '/api/cameras/add'):
             name = (body.get('name') or '').strip()
             location = (body.get('location') or '').strip() or name
             rtsp = (body.get('rtsp') or '').strip()

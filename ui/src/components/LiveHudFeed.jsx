@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { playTacticalChime } from '../utils/alertSound';
+import WebRTCPlayer from './WebRTCPlayer';
 
 function CameraFormModal({
   isOpen,
@@ -1073,14 +1074,10 @@ export default function LiveHudFeed({
               onClick={(e) => handleFeedClick(e, slot1Camera)}
               title={quickBlacklistMode ? "Click directly on any face in the feed to toggle blacklist" : ""}
             >
-              <img
-                src={`/api/stream/feed?camera=${encodeURIComponent(slot1Camera)}&hud=${hudEnabled ? 1 : 0}&t=${streamKey}`}
-                alt={slot1Obj.name}
-                style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block', pointerEvents: 'none' }}
-                onError={(e) => {
-                  e.target.style.display = 'none';
-                  e.target.nextSibling.style.display = 'flex';
-                }}
+              <WebRTCPlayer
+                streamPath={slot1Obj?.webrtc_path || slot1Camera}
+                cameraObj={slot1Obj}
+                title={quickBlacklistMode ? "Click directly on any face in the feed to toggle blacklist" : ""}
               />
               {clickEffect && clickEffect.camId === slot1Camera && (
                 <div
@@ -1281,14 +1278,10 @@ export default function LiveHudFeed({
               onClick={(e) => handleFeedClick(e, slot2Camera)}
               title={quickBlacklistMode ? "Click directly on any face in the feed to toggle blacklist" : ""}
             >
-              <img
-                src={`/api/stream/feed?camera=${encodeURIComponent(slot2Camera)}&hud=${hudEnabled ? 1 : 0}&t=${streamKey}`}
-                alt={slot2Obj.name}
-                style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block', pointerEvents: 'none' }}
-                onError={(e) => {
-                  e.target.style.display = 'none';
-                  e.target.nextSibling.style.display = 'flex';
-                }}
+              <WebRTCPlayer
+                streamPath={slot2Obj?.webrtc_path || slot2Camera}
+                cameraObj={slot2Obj}
+                title={quickBlacklistMode ? "Click directly on any face in the feed to toggle blacklist" : ""}
               />
               {clickEffect && clickEffect.camId === slot2Camera && (
                 <div
@@ -1498,14 +1491,10 @@ export default function LiveHudFeed({
             onClick={(e) => handleFeedClick(e, activeCamera)}
             title={quickBlacklistMode ? "Click directly on any face in the feed to toggle blacklist" : ""}
           >
-            <img
-              src={`/api/stream/feed?camera=${encodeURIComponent(activeCamera)}&hud=${hudEnabled ? 1 : 0}&t=${streamKey}`}
-              alt={focusCamObj.name}
-              style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block', pointerEvents: 'none' }}
-              onError={(e) => {
-                e.target.style.display = 'none';
-                e.target.nextSibling.style.display = 'flex';
-              }}
+            <WebRTCPlayer
+              streamPath={focusCamObj?.webrtc_path || activeCamera}
+              cameraObj={focusCamObj}
+              title={quickBlacklistMode ? "Click directly on any face in the feed to toggle blacklist" : ""}
             />
             {clickEffect && clickEffect.camId === activeCamera && (
               <div
