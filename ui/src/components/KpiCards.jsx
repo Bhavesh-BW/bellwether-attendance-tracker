@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-export default function KpiCards({ kpis, period = 'today', onDataRefresh }) {
+export default function KpiCards({ kpis, period = 'today', onDataRefresh, orgId }) {
   const p = (kpis?.period || period || 'today').toLowerCase();
   const periodLabelMap = {
     today: 'Today (Live Shift)',
@@ -9,6 +9,11 @@ export default function KpiCards({ kpis, period = 'today', onDataRefresh }) {
     '30d': 'Past 30 Days'
   };
   const pText = periodLabelMap[p] || 'Today';
+
+  const isHospitalOrg = orgId === 'medanta';
+  const totalDoctors = kpis?.total_doctors ?? 0;
+  const doctorsPresent = kpis?.doctors_present ?? 0;
+  const doctorsPct = kpis?.doctors_percent ?? 0;
 
   const totalPersonnel = kpis?.total_personnel ?? 224;
   const inCampusNow = kpis?.in_campus_now ?? kpis?.currently_in_hospital ?? 176;
@@ -103,6 +108,23 @@ export default function KpiCards({ kpis, period = 'today', onDataRefresh }) {
         </svg>
       )
     },
+    ...(isHospitalOrg ? [{
+      id: 'doctors_on_duty',
+      label: 'Doctors & Specialists',
+      value: Number(doctorsPresent).toLocaleString(),
+      secondary: `(${doctorsPct}%)`,
+      subtext: `${doctorsPresent} of ${totalDoctors} doctors on duty`,
+      accent: '#0d9488', // Teal
+      bgLight: '#f0fdfa',
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0d9488" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/>
+          <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/>
+          <path d="M9 12H4s.55-3.03 2-4.5c1.45-1.47 4.5-2 4.5-2"/>
+          <path d="M15 9h5"/>
+        </svg>
+      )
+    }] : []),
     {
       id: 'avg_active_time',
       label: 'Avg. Active Time',

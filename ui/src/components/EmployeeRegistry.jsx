@@ -1,3 +1,38 @@
+
+// Helper to process and auto-downscale uploaded photos to max 400x400 JPEG (~30KB)
+const processImageFile = (file) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 400;
+        let w = img.width;
+        let h = img.height;
+        if (w > maxDim || h > maxDim) {
+          if (w > h) {
+            h = Math.round((h * maxDim) / w);
+            w = maxDim;
+          } else {
+            w = Math.round((w * maxDim) / h);
+            h = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+};
+
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 
 const DEPARTMENTS = [
@@ -102,6 +137,10 @@ export default function EmployeeRegistry({
   const [zoneDateFilter, setZoneDateFilter] = useState('');
   const [editingEmployeeModal, setEditingEmployeeModal] = useState(null);
   const [editEmployeeForm, setEditEmployeeForm] = useState({ name: '', department: '', designation: '', restricted_cameras: [] });
+  const [editEmployeeCrops, setEditEmployeeCrops] = useState([]);
+  const [isEditPhotoLoading, setIsEditPhotoLoading] = useState(false);
+  const editAddPhotoInputRef = React.useRef(null);
+  const editReplacePhotoInputRef = React.useRef(null);
   const [savingEmployeeEdit, setSavingEmployeeEdit] = useState(false);
 
   const fetchZoneIntrusions = useCallback(async () => {
@@ -183,6 +222,8 @@ export default function EmployeeRegistry({
       try { restr = JSON.parse(restr); } catch { restr = []; }
     }
     setEditingEmployeeModal(v);
+    const initialCrops = Array.isArray(v.crops) && v.crops.length > 0 ? v.crops : (v.photo_b64 ? [v.photo_b64] : []);
+    setEditEmployeeCrops(initialCrops);
     setEditEmployeeForm({
       name: v.name || v.display_name || '',
       department: v.department || 'General Staff',
@@ -216,6 +257,77 @@ export default function EmployeeRegistry({
       showNotice(err.message || 'Error updating employee', false);
     } finally {
       setSavingEmployeeEdit(false);
+    }
+  };
+
+
+  const handleEditModalDeleteCrop = async (cropIdx) => {
+    if (!editingEmployeeModal) return;
+    const targetCrop = editEmployeeCrops[cropIdx];
+    if (!targetCrop) return;
+    if (!window.confirm(`Delete angle capture #${cropIdx + 1}?`)) return;
+
+    setIsEditPhotoLoading(true);
+    try {
+      const res = await fetch('/api/visitors/remove-crop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visitor_id: editingEmployeeModal.id,
+          crop_index: cropIdx,
+          crop_b64: targetCrop
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to remove crop');
+
+      const nextCrops = Array.isArray(data.crops) ? data.crops : editEmployeeCrops.filter((_, i) => i !== cropIdx);
+      setEditEmployeeCrops(nextCrops);
+      setEditingEmployeeModal(prev => prev ? { ...prev, crops: nextCrops, photo_b64: data.photo_b64 || (nextCrops[0] || null) } : prev);
+      showNotice(`✓ Angle #${cropIdx + 1} deleted and AI biometrics re-indexed`);
+      if (onDataRefresh) onDataRefresh();
+    } catch (err) {
+      showNotice(err.message || 'Error deleting angle', false);
+    } finally {
+      setIsEditPhotoLoading(false);
+    }
+  };
+
+  const handleEditModalUploadPhotos = async (e, action = 'add') => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length || !editingEmployeeModal) return;
+
+    setIsEditPhotoLoading(true);
+    try {
+      const b64List = [];
+      for (const f of files) {
+        const b64 = await processImageFile(f);
+        if (b64) b64List.push(b64);
+      }
+      if (!b64List.length) throw new Error('No valid image files processed');
+
+      const res = await fetch('/api/employees/update-photos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: editingEmployeeModal.id,
+          action,
+          photos_b64: b64List
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update photos');
+
+      const nextCrops = Array.isArray(data.crops) ? data.crops : editEmployeeCrops;
+      setEditEmployeeCrops(nextCrops);
+      setEditingEmployeeModal(prev => prev ? { ...prev, crops: nextCrops, photo_b64: data.photo_b64 || (nextCrops[0] || null), is_enrolled: 1 } : prev);
+      showNotice(action === 'replace' ? `✓ Replaced biometrics with ${b64List.length} photo(s)` : `✓ Added ${b64List.length} angle photo(s)`);
+      if (onDataRefresh) onDataRefresh();
+    } catch (err) {
+      showNotice(err.message || 'Error uploading photo', false);
+    } finally {
+      setIsEditPhotoLoading(false);
+      e.target.value = '';
     }
   };
 
@@ -421,6 +533,8 @@ export default function EmployeeRegistry({
     if (!ledgerData || !ledgerData.employees) return [];
     return ledgerData.employees.filter(e => {
       if (ledgerDeptFilter !== 'all' && (e.department || 'General Staff') !== ledgerDeptFilter) return false;
+      if (ledgerStatusFilter === 'enrolled' && !e.is_enrolled) return false;
+      if (ledgerStatusFilter === 'auto' && e.is_enrolled) return false;
       if (ledgerStatusFilter === 'on_duty' && e.status !== 'On Duty') return false;
       if (ledgerStatusFilter === 'checked_out' && e.status !== 'Checked Out') return false;
       if (ledgerStatusFilter === 'absent' && e.status !== 'Absent') return false;
@@ -443,6 +557,14 @@ export default function EmployeeRegistry({
   const enrolledStaffCount = useMemo(() => {
     return visitors.filter(v => Boolean(v.is_enrolled)).length;
   }, [visitors]);
+
+  const ledgerEnrolledCount = useMemo(() => {
+    return (ledgerData?.employees || []).filter(e => e.is_enrolled).length;
+  }, [ledgerData]);
+
+  const ledgerAutoCount = useMemo(() => {
+    return (ledgerData?.employees || []).filter(e => !e.is_enrolled).length;
+  }, [ledgerData]);
 
   const watchlistIds = useMemo(() => {
     const s = new Set();
@@ -634,7 +756,8 @@ export default function EmployeeRegistry({
     try {
       const res = await fetch('/api/visitors/delete-auto-enrolled', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org_id: activeOrgId })
       });
       const data = await res.json();
       if (res.ok) {
@@ -1011,7 +1134,7 @@ export default function EmployeeRegistry({
               color: activeSection === 'ledger' ? '#0f766e' : '#0f766e',
               boxShadow: activeSection === 'ledger' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
             }}>
-              {enrolledStaffCount}
+              {ledgerData?.employees?.length ?? visitors.length}
             </span>
           </button>
 
@@ -1983,28 +2106,26 @@ export default function EmployeeRegistry({
                               border: isNotCheckedIn ? '1px solid #e2e8f0' : 'none' }}>
                               {isNotCheckedIn ? '— NOT IN PREMISES' : (isCheckedOut ? '✓ OUT' : '● ON DUTY')}
                             </span>
-                            {isEnrolled && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openSingleOverride(v, (!v.today_check_in || isCheckedOut) ? 'check_in' : 'check_out');
-                                }}
-                                style={{
-                                  padding: '3px 8px',
-                                  fontSize: '11px',
-                                  fontWeight: '700',
-                                  borderRadius: '5px',
-                                  border: 'none',
-                                  backgroundColor: (!v.today_check_in || isCheckedOut) ? '#059669' : '#ea580c',
-                                  color: '#fff',
-                                  cursor: 'pointer'
-                                }}
-                                title={!v.today_check_in ? "Manual Check-In" : (isCheckedOut ? "Manual Check-In back on duty" : "Manual Check-Out")}
-                              >
-                                {(!v.today_check_in || isCheckedOut) ? '🟢 In' : '🚪 Out'}
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openSingleOverride(v, (!v.today_check_in || isCheckedOut) ? 'check_in' : 'check_out');
+                              }}
+                              style={{
+                                padding: '3px 8px',
+                                fontSize: '11px',
+                                fontWeight: '700',
+                                borderRadius: '5px',
+                                border: 'none',
+                                backgroundColor: (!v.today_check_in || isCheckedOut) ? '#059669' : '#ea580c',
+                                color: '#fff',
+                                cursor: 'pointer'
+                              }}
+                              title={!v.today_check_in ? "Manual Check-In" : (isCheckedOut ? "Manual Check-In back on duty" : "Manual Check-Out")}
+                            >
+                              {(!v.today_check_in || isCheckedOut) ? '🟢 In' : '🚪 Out'}
+                            </button>
                             {isBlk ? (
                               <button
                                 onClick={async (e) => {
@@ -2169,8 +2290,8 @@ export default function EmployeeRegistry({
             {/* Quick Metrics */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
               <div style={{ textAlign: 'center', padding: '6px 12px', backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #99f6e4', minWidth: '70px' }}>
-                <div style={{ fontSize: '16px', fontWeight: '800', color: '#0f766e' }}>{ledgerData?.summary?.total_enrolled ?? enrolledStaffCount}</div>
-                <div style={{ fontSize: '10px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase' }}>Enrolled</div>
+                <div style={{ fontSize: '16px', fontWeight: '800', color: '#0f766e' }}>{ledgerData?.summary?.total_staff ?? ledgerData?.employees?.length ?? 0}</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase' }}>Total Staff</div>
               </div>
               <div style={{ textAlign: 'center', padding: '6px 12px', backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #bbf7d0', minWidth: '70px' }}>
                 <div style={{ fontSize: '16px', fontWeight: '800', color: '#15803d' }}>{ledgerData?.summary?.on_duty_count ?? 0}</div>
@@ -2235,6 +2356,8 @@ export default function EmployeeRegistry({
               <div style={{ display: 'flex', gap: '4px', backgroundColor: '#f1f5f9', padding: '3px', borderRadius: '8px' }}>
                 {[
                   ['all', `All (${ledgerData?.employees?.length ?? 0})`],
+                  ['enrolled', `Enrolled (${ledgerEnrolledCount})`],
+                  ['auto', `Auto ID (${ledgerAutoCount})`],
                   ['on_duty', `🟢 On Duty (${ledgerData?.summary?.on_duty_count ?? 0})`],
                   ['checked_out', `✓ Checked Out (${ledgerData?.summary?.checked_out_count ?? 0})`],
                   ['absent', `⚪ Absent (${ledgerData?.summary?.absent_count ?? 0})`]
@@ -2438,8 +2561,13 @@ export default function EmployeeRegistry({
                               )}
                             </div>
                             <div>
-                              <div style={{ fontWeight: '800', color: '#0f172a', fontSize: '13px' }}>
+                              <div style={{ fontWeight: '800', color: '#0f172a', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 {emp.name || emp.employee_id}
+                                {!emp.is_enrolled && (
+                                  <span style={{ fontSize: '9px', fontWeight: '800', padding: '1px 5px', borderRadius: '4px', backgroundColor: '#fef3c7', color: '#b45309', border: '1px solid #fde68a' }}>
+                                    AUTO ID
+                                  </span>
+                                )}
                               </div>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
                                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#0284c7', fontWeight: '700' }}>
@@ -3078,7 +3206,7 @@ export default function EmployeeRegistry({
 
                             {/* Duty Before Exit */}
                             <td style={{ padding: '10px 14px', fontWeight: '700', color: '#0f172a', whiteSpace: 'nowrap' }}>
-                              {v.today_duration_str || `${v.today_duration_mins || 0}m on-site`}
+                              {v.duty_before_exit_str || v.today_duration_str || `${v.today_duration_mins || 0}m on-site`}
                             </td>
 
                             {/* Time Missing / Absent Duration (Live) */}
@@ -5443,6 +5571,145 @@ export default function EmployeeRegistry({
                     boxSizing: 'border-box'
                   }}
                 />
+              </div>
+
+              {/* Biometric Face Angles & Image Management Section */}
+              <div style={{
+                padding: '12px 14px',
+                borderRadius: '10px',
+                backgroundColor: '#f8fafc',
+                border: '1px solid #e2e8f0'
+              }}>
+                <input
+                  type="file"
+                  ref={editAddPhotoInputRef}
+                  onChange={(e) => handleEditModalUploadPhotos(e, 'add')}
+                  multiple
+                  accept="image/png,image/jpeg,image/webp,image/jpg"
+                  style={{ display: 'none' }}
+                />
+                <input
+                  type="file"
+                  ref={editReplacePhotoInputRef}
+                  onChange={(e) => handleEditModalUploadPhotos(e, 'replace')}
+                  multiple
+                  accept="image/png,image/jpeg,image/webp,image/jpg"
+                  style={{ display: 'none' }}
+                />
+
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', flexWrap: 'wrap', gap: '6px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: '800', color: '#0369a1' }}>
+                      Face Biometrics ({editEmployeeCrops.length}/6 Angles)
+                    </span>
+                    {isEditPhotoLoading && <span style={{ fontSize: '11px', color: '#0284c7', fontWeight: '700' }}>⏳ Syncing AI...</span>}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <button
+                      type="button"
+                      onClick={() => editAddPhotoInputRef.current && editAddPhotoInputRef.current.click()}
+                      disabled={editEmployeeCrops.length >= 6 || isEditPhotoLoading}
+                      title={editEmployeeCrops.length >= 6 ? "Max 6 angle captures reached. Delete an angle to add another." : "Add new angle photo"}
+                      style={{
+                        padding: '3px 8px',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        borderRadius: '6px',
+                        border: '1px solid #bae6fd',
+                        backgroundColor: editEmployeeCrops.length >= 6 ? '#f1f5f9' : '#e0f2fe',
+                        color: editEmployeeCrops.length >= 6 ? '#94a3b8' : '#0284c7',
+                        cursor: editEmployeeCrops.length >= 6 ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      + Add Angle
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => editReplacePhotoInputRef.current && editReplacePhotoInputRef.current.click()}
+                      disabled={isEditPhotoLoading}
+                      title="Replace all existing photos with new photos"
+                      style={{
+                        padding: '3px 8px',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        borderRadius: '6px',
+                        border: '1px solid #fed7aa',
+                        backgroundColor: '#ffedd5',
+                        color: '#c2410c',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      🔄 Replace All
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  {editEmployeeCrops.length === 0 ? (
+                    <div style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic', padding: '6px 0' }}>
+                      No angle photos registered. Click "+ Add Angle" above to upload photos.
+                    </div>
+                  ) : (
+                    editEmployeeCrops.map((c, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          position: 'relative',
+                          width: '44px',
+                          height: '44px'
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: '100%',
+                            height: '100%',
+                            borderRadius: '6px',
+                            overflow: 'hidden',
+                            border: idx === 0 ? '2px solid #0284c7' : '1px solid #cbd5e1',
+                            boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+                          }}
+                        >
+                          <img
+                            src={c.startsWith('data:') ? c : `data:image/jpeg;base64,${c}`}
+                            alt={`Angle ${idx + 1}`}
+                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleEditModalDeleteCrop(idx);
+                          }}
+                          title={`Delete Angle #${idx + 1}`}
+                          style={{
+                            position: 'absolute',
+                            top: '-4px',
+                            right: '-4px',
+                            width: '16px',
+                            height: '16px',
+                            borderRadius: '50%',
+                            backgroundColor: '#ef4444',
+                            color: '#ffffff',
+                            border: '1.5px solid #ffffff',
+                            fontSize: '9px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            cursor: 'pointer',
+                            fontWeight: '900',
+                            padding: 0,
+                            boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                            zIndex: 2
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
 
               {/* Department & Designation Row */}

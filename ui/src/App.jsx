@@ -49,8 +49,15 @@ export default function App() {
   const [registrySection, setRegistrySection] = useState('details');
   const [loading, setLoading] = useState(true);
   const [orgs, setOrgs] = useState([]);
-  const [activeOrgId, setActiveOrgId] = useState('bellwether');
-  const activeOrgIdRef = useRef('bellwether');
+
+  // URL query parameter org locking (e.g. ?org=medanta or ?org_id=medanta)
+  const urlParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : new URLSearchParams();
+  const urlOrg = urlParams.get('org') || urlParams.get('org_id');
+  const isOrgLocked = Boolean(urlOrg);
+  const initialOrg = urlOrg || 'bellwether';
+
+  const [activeOrgId, setActiveOrgId] = useState(initialOrg);
+  const activeOrgIdRef = useRef(initialOrg);
   const [showAddOrgModal, setShowAddOrgModal] = useState(false);
   const [newOrgName, setNewOrgName] = useState('');
   const [newOrgIndustry, setNewOrgIndustry] = useState('Corporate');
@@ -95,12 +102,12 @@ export default function App() {
         setActiveCamera(null);
       }
       if (trendRes) setTrendData(trendRes);
-      if (visRes) setVisitors(visRes);
+      if (visRes && Array.isArray(visRes)) setVisitors(visRes);
       if (watchRes) setWatchlist(watchRes);
       if (alertRes) setAlerts(alertRes);
       if (orgRes?.orgs) {
         setOrgs(orgRes.orgs);
-        if (orgRes.active_org_id && orgRes.active_org_id !== activeOrgIdRef.current && !localStorage.getItem('user_switched_org')) {
+        if (!isOrgLocked && orgRes.active_org_id && orgRes.active_org_id !== activeOrgIdRef.current && !localStorage.getItem('user_switched_org')) {
           const srvOrg = orgRes.active_org_id;
           setActiveOrgId(srvOrg);
           activeOrgIdRef.current = srvOrg;
@@ -532,7 +539,7 @@ export default function App() {
       const res = await fetch('/api/settings/auto-enroll', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: nextVal })
+        body: JSON.stringify({ enabled: nextVal, org_id: activeOrgId })
       });
       const data = await res.json();
       if (data && typeof data.auto_enroll_enabled === 'boolean') {
@@ -548,6 +555,7 @@ export default function App() {
   const handleOrgChange = async (newOrgId) => {
     setActiveOrgId(newOrgId);
     activeOrgIdRef.current = newOrgId;
+    setVisitors([]); // Immediately clear previous org visitors to prevent state leakage
     try {
       await fetch('/api/orgs/select', {
         method: 'POST',
@@ -636,6 +644,7 @@ export default function App() {
         onBlacklist={(vid) => {
           handleBlacklist(vid, null, 'Flagged from Journey Audit');
         }}
+        onEmployeeUpdated={fetchData}
       />
 
       {/* Main Header */}
@@ -683,7 +692,23 @@ export default function App() {
         {/* Header Right Actions */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
           {/* Org Selector & Management */}
-          {orgs.length > 0 && (
+          {isOrgLocked ? (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              backgroundColor: '#ecfdf5',
+              border: '1.5px solid #a7f3d0',
+              padding: '5px 12px',
+              borderRadius: '8px',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.04)'
+            }}>
+              <span style={{ fontSize: '14px' }}>{activeOrgId === 'medanta' ? '🏥' : '🏢'}</span>
+              <span style={{ fontSize: '12px', fontWeight: '800', color: '#065f46' }}>
+                {orgs.find(o => o.id === activeOrgId)?.name || (activeOrgId === 'medanta' ? 'Medanta Hospital' : activeOrgId)}
+              </span>
+            </div>
+          ) : orgs.length > 0 && (
             <div style={{
               display: 'flex',
               alignItems: 'center',
@@ -898,7 +923,7 @@ export default function App() {
           <button
             type="button"
             onClick={handleToggleAutoEnroll}
-            title={autoEnrollEnabled ? "Auto-Enrollment is Active. Click to Stop creating new profiles." : "Auto-Enrollment is Stopped. Only existing profiles are checked. Click to Resume."}
+            title={autoEnrollEnabled ? `Auto-Enrollment is Active for ${orgs.find(o => o.id === activeOrgId)?.name || 'this Organization'}. Click to Stop creating new profiles.` : `Auto-Enrollment is Stopped for ${orgs.find(o => o.id === activeOrgId)?.name || 'this Organization'}. Only existing profiles are checked. Click to Resume.`}
             style={{
               padding: '7px 14px',
               borderRadius: '8px',
@@ -977,7 +1002,7 @@ export default function App() {
       </div>
 
       {/* Top 4 Attendance KPI Cards */}
-      <KpiCards kpis={kpis} period={trendRange} onDataRefresh={fetchData} />
+      <KpiCards kpis={kpis} period={trendRange} onDataRefresh={fetchData} orgId={activeOrgId} />
 
       {/* Dynamic Multi-Camera Main Stage (LiveHudFeed + TrafficTrendChart) */}
       {viewMode === 'grid' ? (

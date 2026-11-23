@@ -1,3 +1,38 @@
+
+// Helper to process and auto-downscale uploaded photos to max 400x400 JPEG (~30KB)
+const processImageFile = (file) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 400;
+        let w = img.width;
+        let h = img.height;
+        if (w > maxDim || h > maxDim) {
+          if (w > h) {
+            h = Math.round((h * maxDim) / w);
+            w = maxDim;
+          } else {
+            w = Math.round((w * maxDim) / h);
+            h = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+};
+
 import React, { useEffect, useState, useMemo } from 'react';
 
 const formatTimeIST = (ts) => {
@@ -66,7 +101,7 @@ const getNDaysAgoStr = (n) => {
   return `${y}-${m}-${day}`;
 };
 
-export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDelete }) {
+export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDelete, onBlacklist, onEmployeeUpdated }) {
   const [journey, setJourney] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -77,6 +112,136 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
   const [selectedCropIdx, setSelectedCropIdx] = useState(0);
   const [previewImg, setPreviewImg] = useState(null);
   const [expandedDays, setExpandedDays] = useState(() => ({ [getTodayDateStr()]: true }));
+
+  // Profile Edit & Biometric Photos states
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [isSavingName, setIsSavingName] = useState(false);
+  const [actionNotice, setActionNotice] = useState(null);
+  const [isPhotoLoading, setIsPhotoLoading] = useState(false);
+  const addFileInputRef = React.useRef(null);
+  const replaceFileInputRef = React.useRef(null);
+
+  const handleSaveName = async () => {
+    const trimmed = (nameDraft || '').trim();
+    if (!trimmed || !visitorId) return;
+    setIsSavingName(true);
+    try {
+      const res = await fetch('/api/employees/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: visitorId,
+          name: trimmed
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update name');
+      setJourney(prev => prev ? {
+        ...prev,
+        name: trimmed,
+        display_name: trimmed,
+        registered_name: trimmed,
+        is_enrolled: 1
+      } : prev);
+      setIsEditingName(false);
+      setActionNotice({ type: 'success', text: `✓ Name updated to "${trimmed}"` });
+      if (onEmployeeUpdated) onEmployeeUpdated();
+      setTimeout(() => setActionNotice(null), 3000);
+    } catch (err) {
+      setActionNotice({ type: 'error', text: err.message || 'Error updating name' });
+    } finally {
+      setIsSavingName(false);
+    }
+  };
+
+  const handleDeleteCrop = async (cropIdx) => {
+    if (!visitorId) return;
+    const currentCrops = Array.isArray(journey?.crops) && journey.crops.length > 0 ? journey.crops : (journey?.photo_b64 ? [journey.photo_b64] : []);
+    const targetCrop = currentCrops[cropIdx];
+    if (!targetCrop) return;
+    if (!window.confirm(`Are you sure you want to remove Angle Capture #${cropIdx + 1}?`)) return;
+
+    setIsPhotoLoading(true);
+    try {
+      const res = await fetch('/api/visitors/remove-crop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visitor_id: visitorId,
+          crop_index: cropIdx,
+          crop_b64: targetCrop
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to remove crop');
+
+      const updatedCrops = Array.isArray(data.crops) ? data.crops : currentCrops.filter((_, i) => i !== cropIdx);
+      setJourney(prev => prev ? {
+        ...prev,
+        crops: updatedCrops,
+        photo_b64: data.photo_b64 || (updatedCrops[0] || null)
+      } : prev);
+      setSelectedCropIdx(prev => prev >= updatedCrops.length ? Math.max(0, updatedCrops.length - 1) : prev);
+      setActionNotice({ type: 'success', text: `✓ Angle capture #${cropIdx + 1} removed & AI biometrics re-indexed` });
+      if (onEmployeeUpdated) onEmployeeUpdated();
+      setTimeout(() => setActionNotice(null), 3000);
+    } catch (err) {
+      setActionNotice({ type: 'error', text: err.message || 'Error removing crop' });
+    } finally {
+      setIsPhotoLoading(false);
+    }
+  };
+
+  const handleUploadPhotos = async (e, action = 'add') => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length || !visitorId) return;
+
+    setIsPhotoLoading(true);
+    try {
+      const b64List = [];
+      for (const f of files) {
+        const b64 = await processImageFile(f);
+        if (b64) b64List.push(b64);
+      }
+
+      if (!b64List.length) throw new Error('No valid images could be processed');
+
+      const res = await fetch('/api/employees/update-photos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: visitorId,
+          action,
+          photos_b64: b64List
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update photos');
+
+      const updatedCrops = Array.isArray(data.crops) ? data.crops : (journey?.crops || []);
+      setJourney(prev => prev ? {
+        ...prev,
+        crops: updatedCrops,
+        photo_b64: data.photo_b64 || (updatedCrops[0] || null),
+        is_enrolled: 1
+      } : prev);
+      setSelectedCropIdx(0);
+      setActionNotice({
+        type: 'success',
+        text: action === 'replace'
+          ? `✓ Replaced biometrics with ${b64List.length} new photo(s)`
+          : `✓ Added ${b64List.length} new angle capture(s)`
+      });
+      if (onEmployeeUpdated) onEmployeeUpdated();
+      setTimeout(() => setActionNotice(null), 3000);
+    } catch (err) {
+      setActionNotice({ type: 'error', text: err.message || 'Error uploading photos' });
+    } finally {
+      setIsPhotoLoading(false);
+      e.target.value = '';
+    }
+  };
 
   // Manual Attendance Override state
   const [manualModalOpen, setManualModalOpen] = useState(false);
@@ -431,10 +596,93 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
               </svg>
             </span>
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <h2 style={{ fontSize: '18px', fontWeight: '800', color: '#0f172a', margin: 0 }}>
-                  {empName}
-                </h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                {isEditingName ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <input
+                      type="text"
+                      value={nameDraft}
+                      onChange={(e) => setNameDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleSaveName();
+                        if (e.key === 'Escape') setIsEditingName(false);
+                      }}
+                      autoFocus
+                      placeholder="Enter employee name..."
+                      style={{
+                        fontSize: '15px',
+                        fontWeight: '700',
+                        color: '#0f172a',
+                        padding: '3px 8px',
+                        borderRadius: '6px',
+                        border: '2px solid #0284c7',
+                        outline: 'none'
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSaveName}
+                      disabled={isSavingName}
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: '12px',
+                        fontWeight: '700',
+                        borderRadius: '6px',
+                        border: 'none',
+                        backgroundColor: '#059669',
+                        color: '#fff',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {isSavingName ? '...' : '✓ Save'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingName(false)}
+                      style={{
+                        padding: '4px 8px',
+                        fontSize: '12px',
+                        fontWeight: '700',
+                        borderRadius: '6px',
+                        border: '1px solid #cbd5e1',
+                        backgroundColor: '#f1f5f9',
+                        color: '#475569',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <h2 style={{ fontSize: '18px', fontWeight: '800', color: '#0f172a', margin: 0 }}>
+                      {empName}
+                    </h2>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNameDraft(journey?.name || journey?.display_name || empId);
+                        setIsEditingName(true);
+                      }}
+                      title="Edit employee name"
+                      style={{
+                        background: '#f1f5f9',
+                        border: '1px solid #cbd5e1',
+                        borderRadius: '6px',
+                        padding: '2px 8px',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        color: '#0284c7',
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '3px'
+                      }}
+                    >
+                      ✏️ Edit Name
+                    </button>
+                  </>
+                )}
                 <span style={{
                   padding: '2px 8px',
                   borderRadius: '9999px',
@@ -535,69 +783,202 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
             flexDirection: 'column',
             gap: '8px'
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontSize: '11px', fontWeight: '800', color: '#0369a1', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                Face Biometrics ({crops.length} Angle Captures)
-              </span>
-              <span style={{ fontSize: '10px', color: '#64748b' }}>
-                {isEnrolled ? 'Verified Roster Face' : 'Auto AI Detected Face'}
-              </span>
+            {/* Hidden File Inputs for Photo Management */}
+            <input
+              type="file"
+              ref={addFileInputRef}
+              onChange={(e) => handleUploadPhotos(e, 'add')}
+              multiple
+              accept="image/png,image/jpeg,image/webp,image/jpg"
+              style={{ display: 'none' }}
+            />
+            <input
+              type="file"
+              ref={replaceFileInputRef}
+              onChange={(e) => handleUploadPhotos(e, 'replace')}
+              multiple
+              accept="image/png,image/jpeg,image/webp,image/jpg"
+              style={{ display: 'none' }}
+            />
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontSize: '11px', fontWeight: '800', color: '#0369a1', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                  Face Biometrics ({crops.length}/6 Angles)
+                </span>
+                {isPhotoLoading && <span style={{ fontSize: '10px', color: '#0284c7', fontWeight: '700' }}>⏳ Syncing AI...</span>}
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <button
+                  type="button"
+                  onClick={() => addFileInputRef.current && addFileInputRef.current.click()}
+                  disabled={crops.length >= 6 || isPhotoLoading}
+                  title={crops.length >= 6 ? "Max 6 angle captures reached. Delete an angle to add another." : "Add new angle photo"}
+                  style={{
+                    padding: '2px 8px',
+                    fontSize: '11px',
+                    fontWeight: '700',
+                    borderRadius: '6px',
+                    border: '1px solid #bae6fd',
+                    backgroundColor: crops.length >= 6 ? '#f1f5f9' : '#e0f2fe',
+                    color: crops.length >= 6 ? '#94a3b8' : '#0284c7',
+                    cursor: crops.length >= 6 ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  + Add Angle
+                </button>
+                <button
+                  type="button"
+                  onClick={() => replaceFileInputRef.current && replaceFileInputRef.current.click()}
+                  disabled={isPhotoLoading}
+                  title="Replace all existing photos with new photos"
+                  style={{
+                    padding: '2px 8px',
+                    fontSize: '11px',
+                    fontWeight: '700',
+                    borderRadius: '6px',
+                    border: '1px solid #fed7aa',
+                    backgroundColor: '#ffedd5',
+                    color: '#c2410c',
+                    cursor: 'pointer'
+                  }}
+                >
+                  🔄 Replace All
+                </button>
+              </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '14px', alignItems: 'center' }}>
-              {/* Main Active Face Crop */}
+            {actionNotice && (
               <div style={{
-                width: '84px',
-                height: '84px',
-                borderRadius: '10px',
-                overflow: 'hidden',
-                border: '2px solid #0284c7',
-                backgroundColor: '#e2e8f0',
-                flexShrink: 0,
-                boxShadow: '0 2px 6px rgba(2,132,199,0.15)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
+                padding: '6px 10px',
+                borderRadius: '6px',
+                fontSize: '11px',
+                fontWeight: '700',
+                backgroundColor: actionNotice.type === 'success' ? '#f0fdf4' : '#fef2f2',
+                color: actionNotice.type === 'success' ? '#166534' : '#991b1b',
+                border: `1px solid ${actionNotice.type === 'success' ? '#bbf7d0' : '#fecaca'}`
               }}>
-                {activeCrop ? (
-                  <img
-                    src={activeCrop.startsWith('data:') ? activeCrop : `data:image/jpeg;base64,${activeCrop}`}
-                    alt="Face crop"
-                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                  />
-                ) : (
-                  <div style={{ fontSize: '24px', fontWeight: '800', color: '#64748b' }}>
-                    {empName.slice(0, 2).toUpperCase()}
-                  </div>
+                {actionNotice.text}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '14px', alignItems: 'flex-start' }}>
+              {/* Main Active Face Crop with Delete Option */}
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                <div style={{
+                  width: '84px',
+                  height: '84px',
+                  borderRadius: '10px',
+                  overflow: 'hidden',
+                  border: '2px solid #0284c7',
+                  backgroundColor: '#e2e8f0',
+                  boxShadow: '0 2px 6px rgba(2,132,199,0.15)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>
+                  {activeCrop ? (
+                    <img
+                      src={activeCrop.startsWith('data:') ? activeCrop : `data:image/jpeg;base64,${activeCrop}`}
+                      alt="Face crop"
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    />
+                  ) : (
+                    <div style={{ fontSize: '24px', fontWeight: '800', color: '#64748b' }}>
+                      {empName.slice(0, 2).toUpperCase()}
+                    </div>
+                  )}
+                </div>
+                {crops.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteCrop(selectedCropIdx)}
+                    disabled={isPhotoLoading}
+                    style={{
+                      padding: '2px 6px',
+                      fontSize: '10px',
+                      fontWeight: '700',
+                      color: '#ef4444',
+                      backgroundColor: '#fef2f2',
+                      border: '1px solid #fecaca',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '2px'
+                    }}
+                    title={`Delete angle #${selectedCropIdx + 1}`}
+                  >
+                    🗑 Remove
+                  </button>
                 )}
               </div>
 
-              {/* Thumbnails of other captured angles */}
+              {/* Thumbnails of other captured angles with delete badge */}
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '11px', color: '#475569', marginBottom: '6px' }}>
-                  Select capture angle to inspect:
+                  {crops.length === 0 ? 'No angle photos registered. Click "+ Add Angle" above.' : 'Select angle to inspect or click ✕ to delete:'}
                 </div>
-                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', maxHeight: '58px', overflowY: 'auto' }}>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', maxHeight: '68px', overflowY: 'auto', padding: '2px' }}>
                   {crops.map((c, idx) => (
                     <div
                       key={idx}
-                      onClick={() => setSelectedCropIdx(idx)}
                       style={{
+                        position: 'relative',
                         width: '38px',
-                        height: '38px',
-                        borderRadius: '6px',
-                        overflow: 'hidden',
-                        cursor: 'pointer',
-                        border: selectedCropIdx === idx ? '2px solid #0284c7' : '1px solid #cbd5e1',
-                        opacity: selectedCropIdx === idx ? 1 : 0.7,
-                        transition: 'all 0.15s'
+                        height: '38px'
                       }}
                     >
-                      <img
-                        src={c.startsWith('data:') ? c : `data:image/jpeg;base64,${c}`}
-                        alt={`Angle ${idx + 1}`}
-                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                      />
+                      <div
+                        onClick={() => setSelectedCropIdx(idx)}
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          borderRadius: '6px',
+                          overflow: 'hidden',
+                          cursor: 'pointer',
+                          border: selectedCropIdx === idx ? '2px solid #0284c7' : '1px solid #cbd5e1',
+                          opacity: selectedCropIdx === idx ? 1 : 0.7,
+                          transition: 'all 0.15s'
+                        }}
+                      >
+                        <img
+                          src={c.startsWith('data:') ? c : `data:image/jpeg;base64,${c}`}
+                          alt={`Angle ${idx + 1}`}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteCrop(idx);
+                        }}
+                        title={`Remove Angle #${idx + 1}`}
+                        style={{
+                          position: 'absolute',
+                          top: '-4px',
+                          right: '-4px',
+                          width: '16px',
+                          height: '16px',
+                          borderRadius: '50%',
+                          backgroundColor: '#ef4444',
+                          color: '#ffffff',
+                          border: '1.5px solid #ffffff',
+                          fontSize: '9px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: 'pointer',
+                          fontWeight: '900',
+                          padding: 0,
+                          boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                          zIndex: 2
+                        }}
+                      >
+                        ✕
+                      </button>
                     </div>
                   ))}
                 </div>
