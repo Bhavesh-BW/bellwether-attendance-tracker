@@ -6,6 +6,7 @@ import EmployeeRegistry from './components/EmployeeRegistry';
 import CinematicThreatAlert from './components/CinematicThreatAlert';
 import JourneyTimelineModal from './components/JourneyTimelineModal';
 import DepartmentAttendanceCard from './components/DepartmentAttendanceCard';
+import { LoadingSpinner } from './components/LoadingSpinner';
 import { playTacticalChime } from './utils/alertSound';
 
 export default function App() {
@@ -48,6 +49,11 @@ export default function App() {
   const [autoEnrollEnabled, setAutoEnrollEnabled] = useState(true);
   const [registrySection, setRegistrySection] = useState('details');
   const [loading, setLoading] = useState(true);
+  const [isPeriodLoading, setIsPeriodLoading] = useState(false);
+  const [isManualRefreshing, setIsManualRefreshing] = useState(false);
+  const [isOrgLoading, setIsOrgLoading] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const periodReqIdRef = useRef(0);
   const [orgs, setOrgs] = useState([]);
 
   // URL query parameter org locking (e.g. ?org=medanta or ?org_id=medanta)
@@ -68,21 +74,25 @@ export default function App() {
 
   // Fetch KPI & status data
   const fetchData = useCallback(async () => {
+    const reqRange = trendRangeRef.current || 'today';
+    const reqOrg = activeOrgIdRef.current || 'bellwether';
     try {
-      const currentRange = trendRangeRef.current || 'today';
-      const currentOrg = activeOrgIdRef.current || 'bellwether';
       const ts = Date.now();
       const [kpiRes, camRes, trendRes, visRes, watchRes, alertRes, orgRes] = await Promise.all([
-        fetch(`/api/kpis?range=${encodeURIComponent(currentRange)}&org_id=${encodeURIComponent(currentOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
-        fetch(`/api/cameras?org_id=${encodeURIComponent(currentOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
-        fetch(`/api/traffic-trend?range=${encodeURIComponent(currentRange)}&org_id=${encodeURIComponent(currentOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
-        fetch(`/api/visitors?limit=250&org_id=${encodeURIComponent(currentOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
-        fetch(`/api/watchlist?org_id=${encodeURIComponent(currentOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
-        fetch(`/api/alerts?org_id=${encodeURIComponent(currentOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+        fetch(`/api/kpis?range=${encodeURIComponent(reqRange)}&org_id=${encodeURIComponent(reqOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+        fetch(`/api/cameras?org_id=${encodeURIComponent(reqOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+        fetch(`/api/traffic-trend?range=${encodeURIComponent(reqRange)}&org_id=${encodeURIComponent(reqOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+        fetch(`/api/visitors?limit=250&org_id=${encodeURIComponent(reqOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+        fetch(`/api/watchlist?org_id=${encodeURIComponent(reqOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+        fetch(`/api/alerts?org_id=${encodeURIComponent(reqOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
         fetch(`/api/orgs?_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null)
       ]);
 
-      if (kpiRes) {
+      // Ignore stale responses if the user switched org mid-flight
+      if (reqOrg !== (activeOrgIdRef.current || 'bellwether')) return;
+      const periodStillMatches = reqRange === (trendRangeRef.current || 'today');
+
+      if (kpiRes && periodStillMatches) {
         setKpis(kpiRes);
         if (typeof kpiRes.auto_enroll_enabled === 'boolean') {
           setAutoEnrollEnabled(kpiRes.auto_enroll_enabled);
@@ -101,7 +111,7 @@ export default function App() {
         setCameras([]);
         setActiveCamera(null);
       }
-      if (trendRes) setTrendData(trendRes);
+      if (trendRes && periodStillMatches) setTrendData(trendRes);
       if (visRes && Array.isArray(visRes)) setVisitors(visRes);
       if (watchRes) setWatchlist(watchRes);
       if (alertRes) setAlerts(alertRes);
@@ -119,6 +129,16 @@ export default function App() {
       setLoading(false);
     }
   }, []);
+
+  const handleManualRefresh = useCallback(async () => {
+    setIsManualRefreshing(true);
+    setRefreshTick((t) => t + 1);
+    try {
+      await fetchData();
+    } finally {
+      setIsManualRefreshing(false);
+    }
+  }, [fetchData]);
 
   // Listen to instantaneous custom refresh events triggered by feed clicks or manual actions
   useEffect(() => {
@@ -323,11 +343,16 @@ export default function App() {
   const handleTrendRangeChange = async (newRange) => {
     setTrendRange(newRange);
     trendRangeRef.current = newRange;
+    const reqId = ++periodReqIdRef.current;
+    const currentOrg = activeOrgIdRef.current || 'bellwether';
+    setIsPeriodLoading(true);
     try {
+      const ts = Date.now();
       const [trendRes, kpiRes] = await Promise.all([
-        fetch(`/api/traffic-trend?range=${encodeURIComponent(newRange)}`).then(r => r.json()).catch(() => null),
-        fetch(`/api/kpis?range=${encodeURIComponent(newRange)}`).then(r => r.json()).catch(() => null)
+        fetch(`/api/traffic-trend?range=${encodeURIComponent(newRange)}&org_id=${encodeURIComponent(currentOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+        fetch(`/api/kpis?range=${encodeURIComponent(newRange)}&org_id=${encodeURIComponent(currentOrg)}&_t=${ts}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null)
       ]);
+      if (reqId !== periodReqIdRef.current) return;
       if (Array.isArray(trendRes)) {
         setTrendData(trendRes);
       }
@@ -336,6 +361,10 @@ export default function App() {
       }
     } catch (e) {
       console.error("Trend/KPI fetch error:", e);
+    } finally {
+      if (reqId === periodReqIdRef.current) {
+        setIsPeriodLoading(false);
+      }
     }
   };
 
@@ -556,6 +585,7 @@ export default function App() {
     setActiveOrgId(newOrgId);
     activeOrgIdRef.current = newOrgId;
     setVisitors([]); // Immediately clear previous org visitors to prevent state leakage
+    setIsOrgLoading(true);
     try {
       await fetch('/api/orgs/select', {
         method: 'POST',
@@ -565,6 +595,8 @@ export default function App() {
       await fetchData();
     } catch (e) {
       console.error('Org switch error:', e);
+    } finally {
+      setIsOrgLoading(false);
     }
   };
 
@@ -721,6 +753,9 @@ export default function App() {
             }}>
               <span style={{ fontSize: '14px' }}>🏢</span>
               <span style={{ fontSize: '12px', fontWeight: '700', color: '#92400e' }}>Org:</span>
+              {isOrgLoading && (
+                <LoadingSpinner size={13} color="#ea580c" trackColor="rgba(234, 88, 12, 0.2)" />
+              )}
               {isEditingOrgName ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                   <input
@@ -864,10 +899,11 @@ export default function App() {
             alignItems: 'center',
             gap: '8px',
             backgroundColor: '#ffffff',
-            border: '1px solid var(--border-light)',
+            border: isPeriodLoading ? '1px solid #38bdf8' : '1px solid var(--border-light)',
             padding: '5px 12px',
             borderRadius: '8px',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.04)'
+            boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+            transition: 'border-color 0.15s ease'
           }}>
             <span style={{ fontSize: '12px', fontWeight: '700', color: 'var(--text-muted)' }}>Period:</span>
             <select
@@ -889,6 +925,9 @@ export default function App() {
               <option value="7d">Past 7 Days</option>
               <option value="30d">Past 30 Days</option>
             </select>
+            {isPeriodLoading && (
+              <LoadingSpinner size={13} color="#0284c7" />
+            )}
           </div>
 
           {/* Sound Toggle */}
@@ -978,31 +1017,42 @@ export default function App() {
           {/* Refresh Button */}
           <button
             type="button"
-            onClick={fetchData}
+            onClick={handleManualRefresh}
+            disabled={isManualRefreshing}
             style={{
               padding: '8px 14px',
               borderRadius: '8px',
-              backgroundColor: '#ffffff',
-              border: '1px solid var(--border-light)',
-              color: 'var(--text-main)',
+              backgroundColor: isManualRefreshing ? '#f0f9ff' : '#ffffff',
+              border: `1px solid ${isManualRefreshing ? '#bae6fd' : 'var(--border-light)'}`,
+              color: isManualRefreshing ? '#0284c7' : 'var(--text-main)',
               fontSize: '12px',
               fontWeight: '600',
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              cursor: 'pointer'
+              cursor: isManualRefreshing ? 'wait' : 'pointer'
             }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
-            </svg>
-            <span>Refresh</span>
+            {(isManualRefreshing || loading || isOrgLoading) ? (
+              <LoadingSpinner size={14} color="#0284c7" />
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+              </svg>
+            )}
+            <span>{isManualRefreshing ? 'Loading...' : 'Refresh'}</span>
           </button>
         </div>
       </div>
 
       {/* Top 4 Attendance KPI Cards */}
-      <KpiCards kpis={kpis} period={trendRange} onDataRefresh={fetchData} orgId={activeOrgId} />
+      <KpiCards
+        kpis={kpis}
+        period={trendRange}
+        onDataRefresh={fetchData}
+        orgId={activeOrgId}
+        loading={loading || isPeriodLoading || isOrgLoading || isManualRefreshing}
+      />
 
       {/* Dynamic Multi-Camera Main Stage (LiveHudFeed + TrafficTrendChart) */}
       {viewMode === 'grid' ? (
@@ -1027,6 +1077,7 @@ export default function App() {
             trendData={trendData}
             activeFilter={trendRange}
             onFilterChange={handleTrendRangeChange}
+            loading={loading || isPeriodLoading || isOrgLoading || isManualRefreshing}
           />
         </div>
       ) : (
@@ -1056,12 +1107,13 @@ export default function App() {
             trendData={trendData}
             activeFilter={trendRange}
             onFilterChange={handleTrendRangeChange}
+            loading={loading || isPeriodLoading || isOrgLoading || isManualRefreshing}
           />
         </div>
       )}
 
       {/* Department-wise Attendance */}
-      <DepartmentAttendanceCard period={trendRange} orgId={activeOrgId} />
+      <DepartmentAttendanceCard period={trendRange} orgId={activeOrgId} refreshTick={refreshTick} />
 
       {/* Employee Registry — compact management table */}
       <EmployeeRegistry
@@ -1079,6 +1131,7 @@ export default function App() {
         activeSectionProp={registrySection}
         onSectionChange={setRegistrySection}
         activeOrgId={activeOrgId}
+        isLoading={loading || isOrgLoading || isManualRefreshing}
       />
 
       {/* Add Organization Modal */}

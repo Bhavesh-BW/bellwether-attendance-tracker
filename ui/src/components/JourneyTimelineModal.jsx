@@ -34,6 +34,7 @@ const processImageFile = (file) => {
 };
 
 import React, { useEffect, useState, useMemo } from 'react';
+import { LoadingSpinner } from './LoadingSpinner';
 
 const formatTimeIST = (ts) => {
   if (!ts) return 'N/A';
@@ -256,13 +257,15 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
 
   const reloadJourney = () => {
     if (!visitorId) return;
-    fetch(`/api/employees/journey?employee_id=${encodeURIComponent(visitorId)}&visitor_id=${encodeURIComponent(visitorId)}`)
+    setLoading(true);
+    fetch(`/api/employees/journey?employee_id=${encodeURIComponent(visitorId)}&visitor_id=${encodeURIComponent(visitorId)}&_t=${Date.now()}`, { cache: 'no-store' })
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP error ${res.status}`);
         return res.json();
       })
       .then((data) => setJourney(data))
-      .catch((err) => console.error(err));
+      .catch((err) => console.error(err))
+      .finally(() => setLoading(false));
   };
 
   const handleManualAttendance = async () => {
@@ -806,7 +809,12 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
                 <span style={{ fontSize: '11px', fontWeight: '800', color: '#0369a1', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                   Face Biometrics ({crops.length}/6 Angles)
                 </span>
-                {isPhotoLoading && <span style={{ fontSize: '10px', color: '#0284c7', fontWeight: '700' }}>⏳ Syncing AI...</span>}
+                {isPhotoLoading && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '10px', color: '#0284c7', fontWeight: '700' }}>
+                    <LoadingSpinner size={11} color="#0284c7" />
+                    <span>Syncing AI...</span>
+                  </span>
+                )}
               </div>
 
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -1178,8 +1186,13 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
         {/* Modal Main Content Area */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
           {loading ? (
-            <div style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>
-              Loading employee attendance records...
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '220px', padding: '40px 20px' }}>
+              <LoadingSpinner
+                size={36}
+                layout="stacked"
+                label="Loading employee attendance records..."
+                sublabel="Fetching biometric sightings & 30-day history from database"
+              />
             </div>
           ) : error ? (
             <div style={{ textAlign: 'center', padding: '40px', color: '#ef4444' }}>
@@ -2146,10 +2159,16 @@ export default function JourneyTimelineModal({ visitorId, isOpen, onClose, onDel
                   color: '#ffffff',
                   fontSize: '12px',
                   fontWeight: '700',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
                   cursor: manualLoading ? 'not-allowed' : 'pointer'
                 }}
               >
-                {manualLoading ? 'Applying...' : `Apply ${manualAction === 'check_out' ? 'Check-Out' : 'Check-In'}`}
+                {manualLoading && (
+                  <LoadingSpinner size={12} color="#ffffff" trackColor="rgba(255, 255, 255, 0.3)" />
+                )}
+                <span>{manualLoading ? 'Applying...' : `Apply ${manualAction === 'check_out' ? 'Check-Out' : 'Check-In'}`}</span>
               </button>
             </div>
           </div>

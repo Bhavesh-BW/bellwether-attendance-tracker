@@ -34,6 +34,7 @@ const processImageFile = (file) => {
 };
 
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { LoadingSpinner, LoadingOverlay } from './LoadingSpinner';
 
 const DEPARTMENTS = [
   'General Staff', 'Management & Leadership', 'Operations', 'Engineering & Tech',
@@ -72,7 +73,8 @@ export default function EmployeeRegistry({
   onDeleteEmployee,
   activeSectionProp,
   onSectionChange,
-  activeOrgId
+  activeOrgId,
+  isLoading = false
 }) {
   // Top Tabs: 'details' (Employee Details) | 'absent' (Absent from Premises) | 'auto_enroll' (Auto-Enrolled Profiles) | 'watchlist' (Security Watchlist)
   const [activeSection, setActiveSection] = useState(activeSectionProp || 'details');
@@ -131,6 +133,7 @@ export default function EmployeeRegistry({
   // -------------------------------------------------------------
   const [zoneIntrusions, setZoneIntrusions] = useState([]);
   const [zoneLoading, setZoneLoading] = useState(false);
+  const zoneReqIdRef = useRef(0);
   const [zoneSearch, setZoneSearch] = useState('');
   const [zoneStatusFilter, setZoneStatusFilter] = useState('all'); // 'all', 'active', 'acknowledged'
   const [zoneCameraFilter, setZoneCameraFilter] = useState('all');
@@ -143,24 +146,34 @@ export default function EmployeeRegistry({
   const editReplacePhotoInputRef = React.useRef(null);
   const [savingEmployeeEdit, setSavingEmployeeEdit] = useState(false);
 
-  const fetchZoneIntrusions = useCallback(async () => {
+  const fetchZoneIntrusions = useCallback(async (isSilent = false) => {
+    const reqId = ++zoneReqIdRef.current;
+    if (!isSilent) {
+      setZoneLoading(true);
+    }
     try {
       const orgParam = activeOrgId ? `&org_id=${encodeURIComponent(activeOrgId)}` : '';
       const dateParam = zoneDateFilter ? `&date=${encodeURIComponent(zoneDateFilter)}` : '';
       const statusParam = zoneStatusFilter && zoneStatusFilter !== 'all' ? `&status=${encodeURIComponent(zoneStatusFilter)}` : '';
-      const res = await fetch(`/api/zone-intrusions?limit=200${orgParam}${dateParam}${statusParam}&_t=${Date.now()}`);
+      const res = await fetch(`/api/zone-intrusions?limit=200${orgParam}${dateParam}${statusParam}&_t=${Date.now()}`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        setZoneIntrusions(data.intrusions || []);
+        if (reqId === zoneReqIdRef.current) {
+          setZoneIntrusions(data.intrusions || []);
+        }
       }
     } catch (err) {
       console.error('Failed to fetch zone intrusions:', err);
+    } finally {
+      if (reqId === zoneReqIdRef.current) {
+        setZoneLoading(false);
+      }
     }
   }, [activeOrgId, zoneDateFilter, zoneStatusFilter]);
 
   useEffect(() => {
-    fetchZoneIntrusions();
-    const interval = setInterval(fetchZoneIntrusions, 5000);
+    fetchZoneIntrusions(false);
+    const interval = setInterval(() => fetchZoneIntrusions(true), 5000);
     return () => clearInterval(interval);
   }, [fetchZoneIntrusions]);
 
@@ -410,30 +423,38 @@ export default function EmployeeRegistry({
   const [bulkLoading, setBulkLoading] = useState(false);
   const [bulkNotice, setBulkNotice] = useState(null);
 
+  const ledgerReqIdRef = useRef(0);
+
   const fetchLedger = useCallback(async (isSilent = false) => {
-    // Only display full loading state if we have no prior data loaded
-    if (!ledgerDataRef.current && !isSilent) {
+    const reqId = ++ledgerReqIdRef.current;
+    if (!isSilent) {
       setLedgerLoading(true);
     } else {
       setLedgerSyncing(true);
     }
     try {
-      const res = await fetch(`/api/attendance/ledger?date=${encodeURIComponent(ledgerDate)}&org_id=${encodeURIComponent(activeOrgId || '')}`);
+      const res = await fetch(
+        `/api/attendance/ledger?date=${encodeURIComponent(ledgerDate)}&org_id=${encodeURIComponent(activeOrgId || '')}&_t=${Date.now()}`,
+        { cache: 'no-store' }
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      if (reqId !== ledgerReqIdRef.current) return;
       ledgerDataRef.current = data;
       setLedgerData(data);
     } catch (err) {
       console.error('Failed to load attendance ledger:', err);
     } finally {
-      setLedgerLoading(false);
-      setLedgerSyncing(false);
+      if (reqId === ledgerReqIdRef.current) {
+        setLedgerLoading(false);
+        setLedgerSyncing(false);
+      }
     }
   }, [ledgerDate, activeOrgId]);
 
-  // Initial load when date or active organization changes
+  // Reload with loading spinner whenever shift date or active organization changes
   useEffect(() => {
-    fetchLedger(Boolean(ledgerDataRef.current));
+    fetchLedger(false);
   }, [fetchLedger]);
 
   // Silent background refresh when sightings update, keeping UI completely stable without flicker
@@ -1872,13 +1893,32 @@ export default function EmployeeRegistry({
               </button>
             )}
 
-            <span style={{ marginLeft: 'auto', fontSize: '11px', color: '#94a3b8', fontWeight: '600' }}>
-              {filtered.length} employees · Page {page}/{totalPages}
-            </span>
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {isLoading && (
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  padding: '2px 8px',
+                  borderRadius: '9999px',
+                  backgroundColor: '#f0f9ff',
+                  border: '1px solid #bae6fd',
+                  fontSize: '11px',
+                  fontWeight: '700',
+                  color: '#0369a1'
+                }}>
+                  <LoadingSpinner size={11} color="#0284c7" />
+                  <span>Loading...</span>
+                </span>
+              )}
+              <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: '600' }}>
+                {filtered.length} employees · Page {page}/{totalPages}
+              </span>
+            </div>
           </div>
 
           {/* Table */}
-          <div style={{ overflowX: 'auto' }}>
+          <div style={{ overflowX: 'auto', position: 'relative', minHeight: isLoading ? '200px' : undefined }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
               <thead>
                 <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
@@ -1888,7 +1928,18 @@ export default function EmployeeRegistry({
                 </tr>
               </thead>
               <tbody>
-                {paged.length === 0 ? (
+                {isLoading && visitors.length === 0 ? (
+                  <tr>
+                    <td colSpan="9" style={{ padding: '44px 20px', textAlign: 'center' }}>
+                      <LoadingSpinner
+                        size={30}
+                        layout="stacked"
+                        label="Loading employee records from database..."
+                        sublabel="Fetching biometric profiles & attendance status"
+                      />
+                    </td>
+                  </tr>
+                ) : paged.length === 0 ? (
                   <tr><td colSpan="9" style={{ padding: '32px', textAlign: 'center', color: '#94a3b8' }}>No employees match the current filter.</td></tr>
                 ) : paged.map((v, idx) => {
                   const isEnrolled = Boolean(v.is_enrolled);
@@ -2206,6 +2257,12 @@ export default function EmployeeRegistry({
                 })}
               </tbody>
             </table>
+            <LoadingOverlay
+              visible={isLoading && visitors.length > 0}
+              spinnerSize={28}
+              message="Refreshing employee records..."
+              subtext="Fetching latest data from database"
+            />
           </div>
 
           {/* Pagination Footer */}
@@ -2333,7 +2390,7 @@ export default function EmployeeRegistry({
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
               {/* Date Selector */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#f8fafc', padding: '4px 8px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#f8fafc', padding: '4px 8px', borderRadius: '8px', border: ledgerLoading ? '1px solid #14b8a6' : '1px solid #e2e8f0' }}>
                 <span style={{ fontSize: '11px', fontWeight: '800', color: '#475569' }}>📅 Shift Date:</span>
                 <input
                   type="date"
@@ -2350,6 +2407,9 @@ export default function EmployeeRegistry({
                     cursor: 'pointer'
                   }}
                 />
+                {ledgerLoading && (
+                  <LoadingSpinner size={13} color="#0f766e" trackColor="rgba(15, 118, 110, 0.2)" />
+                )}
               </div>
 
               {/* Status Filters */}
@@ -2424,30 +2484,30 @@ export default function EmployeeRegistry({
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <button
                 type="button"
-                onClick={() => fetchLedger(true)}
-                disabled={ledgerSyncing}
+                onClick={() => fetchLedger(false)}
+                disabled={ledgerSyncing || ledgerLoading}
                 style={{
                   padding: '5px 12px',
                   borderRadius: '6px',
                   border: '1px solid #cbd5e1',
-                  backgroundColor: '#ffffff',
-                  color: '#475569',
+                  backgroundColor: (ledgerSyncing || ledgerLoading) ? '#f0fdfa' : '#ffffff',
+                  color: (ledgerSyncing || ledgerLoading) ? '#0f766e' : '#475569',
                   fontSize: '12px',
                   fontWeight: '700',
-                  cursor: ledgerSyncing ? 'not-allowed' : 'pointer',
+                  cursor: (ledgerSyncing || ledgerLoading) ? 'wait' : 'pointer',
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: '6px',
                   boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
                 }}
-                title="Refresh attendance ledger in background"
+                title="Refresh attendance ledger from database"
               >
-                <span style={{
-                  display: 'inline-block',
-                  transform: ledgerSyncing ? 'rotate(180deg)' : 'none',
-                  transition: 'transform 0.4s ease'
-                }}>🔄</span>
-                <span>{ledgerSyncing ? 'Syncing...' : 'Refresh'}</span>
+                {(ledgerSyncing || ledgerLoading) ? (
+                  <LoadingSpinner size={13} color="#0f766e" trackColor="rgba(15, 118, 110, 0.2)" />
+                ) : (
+                  <span>🔄</span>
+                )}
+                <span>{(ledgerSyncing || ledgerLoading) ? 'Loading...' : 'Refresh'}</span>
               </button>
 
               <button
@@ -2480,7 +2540,7 @@ export default function EmployeeRegistry({
           </div>
 
           {/* Ledger Table — with fixed minimum height to guarantee zero layout shifts */}
-          <div style={{ overflowX: 'auto', minHeight: '300px' }}>
+          <div style={{ overflowX: 'auto', minHeight: '300px', position: 'relative' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
               <thead>
                 <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#475569' }}>
@@ -2499,11 +2559,15 @@ export default function EmployeeRegistry({
               <tbody>
                 {(!ledgerData && ledgerLoading) ? (
                   <tr>
-                    <td colSpan="10" style={{ padding: '36px', textAlign: 'center', color: '#64748b' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                        <span>⏳</span>
-                        <span>Loading shift attendance ledger...</span>
-                      </div>
+                    <td colSpan="10" style={{ padding: '48px 20px', textAlign: 'center', color: '#64748b' }}>
+                      <LoadingSpinner
+                        size={32}
+                        color="#0f766e"
+                        trackColor="rgba(15, 118, 110, 0.2)"
+                        layout="stacked"
+                        label={`Loading shift ledger for ${ledgerDate}...`}
+                        sublabel="Querying database records"
+                      />
                     </td>
                   </tr>
                 ) : filteredLedgerEmployees.length === 0 ? (
@@ -2826,6 +2890,14 @@ export default function EmployeeRegistry({
                 )}
               </tbody>
             </table>
+            <LoadingOverlay
+              visible={Boolean(ledgerData && ledgerLoading)}
+              spinnerSize={30}
+              color="#0f766e"
+              trackColor="rgba(15, 118, 110, 0.2)"
+              message={`Loading shift ledger for ${ledgerDate}...`}
+              subtext="Querying database records"
+            />
           </div>
         </div>
       )}
@@ -2931,6 +3003,9 @@ export default function EmployeeRegistry({
                     outline: 'none'
                   }}
                 />
+                {ledgerLoading && (
+                  <LoadingSpinner size={13} color="#b91c1c" trackColor="rgba(185, 28, 28, 0.2)" />
+                )}
               </div>
             )}
           </div>
@@ -3451,7 +3526,7 @@ export default function EmployeeRegistry({
               </div>
 
               {/* Extended Absence Log Table */}
-              <div style={{ overflowX: 'auto' }}>
+              <div style={{ overflowX: 'auto', position: 'relative', minHeight: ledgerLoading ? '200px' : undefined }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
                   <thead>
                     <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
@@ -3461,7 +3536,20 @@ export default function EmployeeRegistry({
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredExtended.length === 0 ? (
+                    {!ledgerData && ledgerLoading ? (
+                      <tr>
+                        <td colSpan="10" style={{ padding: '44px 20px', textAlign: 'center' }}>
+                          <LoadingSpinner
+                            size={30}
+                            color="#b91c1c"
+                            trackColor="rgba(185, 28, 28, 0.2)"
+                            layout="stacked"
+                            label={`Loading absence & break audit log for ${ledgerDate}...`}
+                            sublabel="Querying database records"
+                          />
+                        </td>
+                      </tr>
+                    ) : filteredExtended.length === 0 ? (
                       <tr>
                         <td colSpan="10" style={{ padding: '36px', textAlign: 'center', color: '#64748b' }}>
                           <div style={{ fontSize: '14px', fontWeight: '700', color: '#059669', marginBottom: '4px' }}>
@@ -3760,6 +3848,14 @@ export default function EmployeeRegistry({
                     )}
                   </tbody>
                 </table>
+                <LoadingOverlay
+                  visible={Boolean(ledgerData && ledgerLoading)}
+                  spinnerSize={28}
+                  color="#b91c1c"
+                  trackColor="rgba(185, 28, 28, 0.2)"
+                  message={`Loading absence audit log for ${ledgerDate}...`}
+                  subtext="Querying database records"
+                />
               </div>
             </div>
           )}
@@ -4378,6 +4474,9 @@ export default function EmployeeRegistry({
                   color: '#334155'
                 }}
               />
+              {zoneLoading && (
+                <LoadingSpinner size={13} color="#991b1b" trackColor="rgba(153, 27, 27, 0.2)" />
+              )}
               {zoneDateFilter && (
                 <button
                   type="button"
@@ -4423,19 +4522,28 @@ export default function EmployeeRegistry({
               )}
               <button
                 type="button"
-                onClick={fetchZoneIntrusions}
+                onClick={() => fetchZoneIntrusions(false)}
+                disabled={zoneLoading}
                 style={{
                   padding: '6px 10px',
                   borderRadius: '6px',
                   border: '1px solid #cbd5e1',
-                  backgroundColor: '#f8fafc',
+                  backgroundColor: zoneLoading ? '#fef2f2' : '#f8fafc',
                   fontSize: '12px',
                   fontWeight: '600',
-                  color: '#475569',
-                  cursor: 'pointer'
+                  color: zoneLoading ? '#991b1b' : '#475569',
+                  cursor: zoneLoading ? 'wait' : 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '5px'
                 }}
               >
-                🔄 Refresh
+                {zoneLoading ? (
+                  <LoadingSpinner size={12} color="#991b1b" trackColor="rgba(153, 27, 27, 0.2)" />
+                ) : (
+                  <span>🔄</span>
+                )}
+                <span>{zoneLoading ? 'Loading...' : 'Refresh'}</span>
               </button>
             </div>
           </div>
@@ -4446,7 +4554,9 @@ export default function EmployeeRegistry({
             borderRadius: '12px',
             border: '1px solid #e2e8f0',
             overflow: 'hidden',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
+            boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
+            position: 'relative',
+            minHeight: zoneLoading ? '200px' : undefined
           }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
               <thead>
@@ -4460,7 +4570,20 @@ export default function EmployeeRegistry({
                 </tr>
               </thead>
               <tbody>
-                {filteredZoneIntrusions.length === 0 ? (
+                {zoneLoading && filteredZoneIntrusions.length === 0 ? (
+                  <tr>
+                    <td colSpan="6" style={{ padding: '44px 16px', textAlign: 'center' }}>
+                      <LoadingSpinner
+                        size={30}
+                        color="#991b1b"
+                        trackColor="rgba(153, 27, 27, 0.2)"
+                        layout="stacked"
+                        label="Loading restricted zone intrusion records..."
+                        sublabel="Querying database"
+                      />
+                    </td>
+                  </tr>
+                ) : filteredZoneIntrusions.length === 0 ? (
                   <tr>
                     <td colSpan="6" style={{ padding: '48px 16px', textAlign: 'center' }}>
                       <div style={{ fontSize: '32px', marginBottom: '8px' }}>🛡️</div>
@@ -4689,6 +4812,14 @@ export default function EmployeeRegistry({
                 )}
               </tbody>
             </table>
+            <LoadingOverlay
+              visible={zoneLoading && filteredZoneIntrusions.length > 0}
+              spinnerSize={28}
+              color="#991b1b"
+              trackColor="rgba(153, 27, 27, 0.2)"
+              message="Loading restricted zone records..."
+              subtext="Querying database"
+            />
           </div>
         </div>
       )}
@@ -5602,7 +5733,12 @@ export default function EmployeeRegistry({
                     <span style={{ fontSize: '12px', fontWeight: '800', color: '#0369a1' }}>
                       Face Biometrics ({editEmployeeCrops.length}/6 Angles)
                     </span>
-                    {isEditPhotoLoading && <span style={{ fontSize: '11px', color: '#0284c7', fontWeight: '700' }}>⏳ Syncing AI...</span>}
+                    {isEditPhotoLoading && (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#0284c7', fontWeight: '700' }}>
+                        <LoadingSpinner size={11} color="#0284c7" />
+                        <span>Syncing AI...</span>
+                      </span>
+                    )}
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <button

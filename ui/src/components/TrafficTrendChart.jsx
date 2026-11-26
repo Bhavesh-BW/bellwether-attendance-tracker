@@ -1,6 +1,7 @@
 import React from 'react';
+import { LoadingSpinner, LoadingOverlay } from './LoadingSpinner';
 
-export default function TrafficTrendChart({ trendData, activeFilter = 'today', onFilterChange }) {
+export default function TrafficTrendChart({ trendData, activeFilter = 'today', onFilterChange, loading = false }) {
   const data = trendData && trendData.length > 0 ? trendData : [
     { label: '08:00', count: 0 },
     { label: '09:00', count: 0 },
@@ -39,12 +40,20 @@ export default function TrafficTrendChart({ trendData, activeFilter = 'today', o
     '30d': 'Staff Attendance (Past 30 Days)'
   };
 
+  const filterLabelMap = {
+    today: 'Today',
+    yesterday: 'Yesterday',
+    '7d': 'Past 7 Days',
+    '30d': 'Past 30 Days'
+  };
+
   const currentTitle = titleMap[activeFilter] || titleMap.today;
   const currentSubtitle = subtitleMap[activeFilter] || subtitleMap.today;
   const currentFooter = footerMap[activeFilter] || footerMap.today;
+  const currentFilterLabel = filterLabelMap[activeFilter] || 'Selected Period';
 
   return (
-    <div className="med-card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div className="med-card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
       {/* Header with Title and Range Filters */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
         <div>
@@ -56,123 +65,153 @@ export default function TrafficTrendChart({ trendData, activeFilter = 'today', o
           </p>
         </div>
 
-        <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
-          {[
-            { id: 'today', label: 'Today' },
-            { id: 'yesterday', label: 'Yesterday' },
-            { id: '7d', label: '7 Days' },
-            { id: '30d', label: '30 Days' }
-          ].map((btn) => (
-            <button
-              key={btn.id}
-              type="button"
-              onClick={() => onFilterChange && onFilterChange(btn.id)}
-              style={{
-                padding: '4px 10px',
-                borderRadius: '6px',
-                fontSize: '11px',
-                fontWeight: '700',
-                border: 'none',
-                cursor: 'pointer',
-                backgroundColor: activeFilter === btn.id ? '#ffffff' : 'transparent',
-                color: activeFilter === btn.id ? '#0284c7' : 'var(--text-muted)',
-                boxShadow: activeFilter === btn.id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none',
-                transition: 'all 0.15s ease'
-              }}
-            >
-              {btn.label}
-            </button>
-          ))}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {loading && (
+            <div style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '4px 9px',
+              borderRadius: '9999px',
+              backgroundColor: '#f0f9ff',
+              border: '1px solid #bae6fd',
+              fontSize: '11px',
+              fontWeight: '700',
+              color: '#0369a1'
+            }}>
+              <LoadingSpinner size={12} color="#0284c7" />
+              <span>Loading...</span>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
+            {[
+              { id: 'today', label: 'Today' },
+              { id: 'yesterday', label: 'Yesterday' },
+              { id: '7d', label: '7 Days' },
+              { id: '30d', label: '30 Days' }
+            ].map((btn) => (
+              <button
+                key={btn.id}
+                type="button"
+                onClick={() => onFilterChange && onFilterChange(btn.id)}
+                style={{
+                  padding: '4px 10px',
+                  borderRadius: '6px',
+                  fontSize: '11px',
+                  fontWeight: '700',
+                  border: 'none',
+                  cursor: 'pointer',
+                  backgroundColor: activeFilter === btn.id ? '#ffffff' : 'transparent',
+                  color: activeFilter === btn.id ? '#0284c7' : 'var(--text-muted)',
+                  boxShadow: activeFilter === btn.id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                {btn.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
       {/* Bar Chart Visualization */}
-      <div style={{ height: '240px', display: 'flex', alignItems: 'flex-end', gap: '8px', padding: '16px 8px 8px 8px', borderBottom: '1px solid var(--border-light)' }}>
-        {data.map((item, idx) => {
-          const hasCount = item.count > 0;
-          const maxBarHeight = 160;
-          const barHeightPx = hasCount && maxCount > 0 ? Math.max(8, Math.round((item.count / maxCount) * maxBarHeight)) : 4;
-          const isPeak = hasCount && item.count === maxCount;
+      <div style={{ position: 'relative' }}>
+        <div style={{ height: '240px', display: 'flex', alignItems: 'flex-end', gap: '8px', padding: '16px 8px 8px 8px', borderBottom: '1px solid var(--border-light)', opacity: loading ? 0.45 : 1, transition: 'opacity 0.15s ease' }}>
+          {data.map((item, idx) => {
+            const hasCount = item.count > 0;
+            const maxBarHeight = 160;
+            const barHeightPx = hasCount && maxCount > 0 ? Math.max(8, Math.round((item.count / maxCount) * maxBarHeight)) : 4;
+            const isPeak = hasCount && item.count === maxCount;
 
-          return (
-            <div
-              key={idx}
-              style={{
-                flex: 1,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                height: '100%',
-                justifyContent: 'flex-end',
-                position: 'relative'
-              }}
-            >
-              {/* Count tooltip */}
-              <div style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                marginBottom: '6px',
-                gap: '2px',
-                minHeight: '26px',
-                justifyContent: 'flex-end'
-              }}>
-                <span style={{
-                  fontSize: '11px',
-                  fontWeight: '800',
-                  color: isPeak ? '#0284c7' : hasCount ? '#0f172a' : '#94a3b8',
-                  lineHeight: 1
+            return (
+              <div
+                key={idx}
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  height: '100%',
+                  justifyContent: 'flex-end',
+                  position: 'relative'
+                }}
+              >
+                {/* Count tooltip */}
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  marginBottom: '6px',
+                  gap: '2px',
+                  minHeight: '26px',
+                  justifyContent: 'flex-end'
                 }}>
-                  {item.count}
-                </span>
-                {hasCount && (item.males !== undefined || item.females !== undefined) && (
                   <span style={{
-                    fontSize: '9px',
-                    fontWeight: '700',
-                    display: 'flex',
-                    gap: '3px',
-                    whiteSpace: 'nowrap',
+                    fontSize: '11px',
+                    fontWeight: '800',
+                    color: isPeak ? '#0284c7' : hasCount ? '#0f172a' : '#94a3b8',
                     lineHeight: 1
                   }}>
-                    <span style={{ color: '#0284c7' }} title="Male Staff">{item.males || 0}♂</span>
-                    <span style={{ color: '#ec4899' }} title="Female Staff">{item.females || 0}♀</span>
+                    {item.count}
                   </span>
-                )}
-              </div>
+                  {hasCount && (item.males !== undefined || item.females !== undefined) && (
+                    <span style={{
+                      fontSize: '9px',
+                      fontWeight: '700',
+                      display: 'flex',
+                      gap: '3px',
+                      whiteSpace: 'nowrap',
+                      lineHeight: 1
+                    }}>
+                      <span style={{ color: '#0284c7' }} title="Male Staff">{item.males || 0}♂</span>
+                      <span style={{ color: '#ec4899' }} title="Female Staff">{item.females || 0}♀</span>
+                    </span>
+                  )}
+                </div>
 
-              {/* Bar */}
-              <div
-                style={{
-                  width: '100%',
-                  maxWidth: '36px',
-                  height: `${barHeightPx}px`,
-                  minHeight: hasCount ? '8px' : '4px',
-                  borderRadius: '5px 5px 2px 2px',
-                  backgroundColor: isPeak ? '#0284c7' : hasCount ? '#38bdf8' : '#e2e8f0',
-                  boxShadow: isPeak ? '0 4px 6px -1px rgba(2, 132, 199, 0.3)' : hasCount ? '0 2px 4px -1px rgba(56, 189, 248, 0.2)' : 'none',
-                  transition: 'height 0.3s ease, background-color 0.2s',
-                  cursor: 'pointer'
-                }}
-                title={`${item.label}: ${item.count} Staff Verified`}
-              />
+                {/* Bar */}
+                <div
+                  style={{
+                    width: '100%',
+                    maxWidth: '36px',
+                    height: `${barHeightPx}px`,
+                    minHeight: hasCount ? '8px' : '4px',
+                    borderRadius: '5px 5px 2px 2px',
+                    backgroundColor: isPeak ? '#0284c7' : hasCount ? '#38bdf8' : '#e2e8f0',
+                    boxShadow: isPeak ? '0 4px 6px -1px rgba(2, 132, 199, 0.3)' : hasCount ? '0 2px 4px -1px rgba(56, 189, 248, 0.2)' : 'none',
+                    transition: 'height 0.3s ease, background-color 0.2s',
+                    cursor: 'pointer'
+                  }}
+                  title={`${item.label}: ${item.count} Staff Verified`}
+                />
 
-              {/* Label */}
-              <div style={{
-                fontSize: '10px',
-                color: 'var(--text-dim)',
-                marginTop: '8px',
-                fontWeight: isPeak ? '700' : '500',
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                maxWidth: '50px',
-                textAlign: 'center'
-              }}>
-                {item.label}
+                {/* Label */}
+                <div style={{
+                  fontSize: '10px',
+                  color: 'var(--text-dim)',
+                  marginTop: '8px',
+                  fontWeight: isPeak ? '700' : '500',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  maxWidth: '50px',
+                  textAlign: 'center'
+                }}>
+                  {item.label}
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
+
+        <LoadingOverlay
+          visible={loading}
+          spinnerSize={28}
+          message={`Loading ${currentFilterLabel} attendance trend...`}
+          subtext="Fetching records from database"
+          borderRadius="10px"
+        />
       </div>
 
       {/* Chart Footer Indicator */}

@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { LoadingSpinner } from './LoadingSpinner';
 
 const formatGridTime = (ts) => {
   if (!ts) return 'Just now';
@@ -821,7 +822,9 @@ export default function RecentVisitorsGrid({
 
             <div style={{ padding: '20px 24px', flex: 1, overflowY: 'auto' }}>
               {loadingSimilar ? (
-                <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>Searching gallery for similar facial profiles...</div>
+                <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                  <LoadingSpinner size={28} layout="stacked" label="Searching gallery for similar facial profiles..." />
+                </div>
               ) : similarCandidates.length === 0 ? (
                 <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>No potential duplicate profiles found. This staff identity is cleanly consolidated.</div>
               ) : (

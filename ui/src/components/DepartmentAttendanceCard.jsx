@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { LoadingSpinner, LoadingOverlay } from './LoadingSpinner';
 
 const PERIOD_LABELS = {
   today: 'Today',
@@ -7,9 +8,10 @@ const PERIOD_LABELS = {
   '30d': 'Past 30 Days'
 };
 
-export default function DepartmentAttendanceCard({ period = 'today', orgId = 'medanta' }) {
+export default function DepartmentAttendanceCard({ period = 'today', orgId = 'medanta', refreshTick = 0 }) {
   const [deptData, setDeptData] = useState([]);
   const [loading, setLoading] = useState(true);
+  const reqIdRef = useRef(0);
 
   const activePeriod = (period || 'today').toLowerCase();
   const periodLabel = PERIOD_LABELS[activePeriod] || 'Today';
@@ -17,28 +19,38 @@ export default function DepartmentAttendanceCard({ period = 'today', orgId = 'me
   useEffect(() => {
     let isMounted = true;
 
-    const fetchDeptAttendance = async () => {
+    const fetchDeptAttendance = async (isSilent = false) => {
+      const reqId = ++reqIdRef.current;
+      if (!isSilent && isMounted) {
+        setLoading(true);
+      }
       try {
-        const res = await fetch(`/api/department-attendance?range=${encodeURIComponent(activePeriod)}&org_id=${encodeURIComponent(orgId || '')}`);
+        const res = await fetch(
+          `/api/department-attendance?range=${encodeURIComponent(activePeriod)}&org_id=${encodeURIComponent(orgId || '')}&_t=${Date.now()}`,
+          { cache: 'no-store' }
+        );
         if (res.ok) {
           const data = await res.json();
-          if (isMounted && Array.isArray(data)) {
+          if (isMounted && reqId === reqIdRef.current && Array.isArray(data)) {
             setDeptData(data);
-            setLoading(false);
           }
         }
       } catch (err) {
         console.error('Failed to load department attendance:', err);
+      } finally {
+        if (isMounted && reqId === reqIdRef.current) {
+          setLoading(false);
+        }
       }
     };
 
-    fetchDeptAttendance();
-    const interval = setInterval(fetchDeptAttendance, 6000);
+    fetchDeptAttendance(false);
+    const interval = setInterval(() => fetchDeptAttendance(true), 6000);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [activePeriod, orgId]);
+  }, [activePeriod, orgId, refreshTick]);
 
   // Aggregate totals dynamically from database rows
   const totalEnrolled = deptData.reduce((acc, r) => acc + (Number(r.total) || 0), 0);
@@ -93,33 +105,54 @@ export default function DepartmentAttendanceCard({ period = 'today', orgId = 'me
           </span>
         </div>
 
-        <span
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '6px',
-            fontSize: '12px',
-            fontWeight: '700',
-            color: '#15803d',
-            backgroundColor: '#dcfce7',
-            padding: '4px 10px',
-            borderRadius: '999px',
-          }}
-        >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {loading && (
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '11.5px',
+                fontWeight: '700',
+                color: '#0369a1',
+                backgroundColor: '#f0f9ff',
+                border: '1px solid #bae6fd',
+                padding: '4px 10px',
+                borderRadius: '999px',
+              }}
+            >
+              <LoadingSpinner size={12} color="#0284c7" />
+              Loading {periodLabel}...
+            </span>
+          )}
           <span
             style={{
-              width: '7px',
-              height: '7px',
-              borderRadius: '50%',
-              backgroundColor: '#16a34a',
-              display: 'inline-block',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontSize: '12px',
+              fontWeight: '700',
+              color: '#15803d',
+              backgroundColor: '#dcfce7',
+              padding: '4px 10px',
+              borderRadius: '999px',
             }}
-          />
-          Live Tracking
-        </span>
+          >
+            <span
+              style={{
+                width: '7px',
+                height: '7px',
+                borderRadius: '50%',
+                backgroundColor: '#16a34a',
+                display: 'inline-block',
+              }}
+            />
+            Live Tracking
+          </span>
+        </div>
       </div>
 
-      <div style={{ overflowX: 'auto' }}>
+      <div style={{ overflowX: 'auto', position: 'relative', minHeight: loading ? '150px' : undefined }}>
         <table
           style={{
             width: '100%',
@@ -189,8 +222,13 @@ export default function DepartmentAttendanceCard({ period = 'today', orgId = 'me
           <tbody>
             {loading && deptData.length === 0 ? (
               <tr>
-                <td colSpan="4" style={{ padding: '24px', textAlign: 'center', color: '#94a3b8', fontSize: '13px' }}>
-                  Loading dynamic department attendance records...
+                <td colSpan="4" style={{ padding: '36px 24px', textAlign: 'center' }}>
+                  <LoadingSpinner
+                    size={30}
+                    layout="stacked"
+                    label={`Loading ${periodLabel} department attendance...`}
+                    sublabel="Querying database records"
+                  />
                 </td>
               </tr>
             ) : deptData.length === 0 ? (
@@ -313,6 +351,12 @@ export default function DepartmentAttendanceCard({ period = 'today', orgId = 'me
             </tfoot>
           )}
         </table>
+        <LoadingOverlay
+          visible={loading && deptData.length > 0}
+          spinnerSize={28}
+          message={`Loading ${periodLabel} department records...`}
+          subtext="Querying database"
+        />
       </div>
     </div>
   );

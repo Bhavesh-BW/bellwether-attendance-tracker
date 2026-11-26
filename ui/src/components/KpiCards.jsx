@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
+import { LoadingOverlay } from './LoadingSpinner';
 
-export default function KpiCards({ kpis, period = 'today', onDataRefresh, orgId }) {
+export default function KpiCards({ kpis, period = 'today', onDataRefresh, orgId, loading = false }) {
   const p = (kpis?.period || period || 'today').toLowerCase();
   const periodLabelMap = {
     today: 'Today (Live Shift)',
@@ -266,8 +267,16 @@ export default function KpiCards({ kpis, period = 'today', onDataRefresh, orgId 
 
   return (
     <>
-      <div className="kpi-cards-grid">
-        {cards.map((card) => (
+      <div style={{ position: 'relative', marginBottom: '20px' }}>
+        <div
+          className="kpi-cards-grid"
+          style={{
+            marginBottom: 0,
+            opacity: loading ? 0.55 : 1,
+            transition: 'opacity 0.15s ease'
+          }}
+        >
+          {cards.map((card) => (
           <div 
             key={card.id}
             className="med-card"
@@ -339,7 +348,14 @@ export default function KpiCards({ kpis, period = 'today', onDataRefresh, orgId 
               )}
             </div>
           </div>
-        ))}
+          ))}
+        </div>
+        <LoadingOverlay
+          visible={loading}
+          compact
+          spinnerSize={20}
+          message={!kpis ? 'Loading attendance metrics from database...' : `Loading ${pText} metrics...`}
+        />
       </div>
 
       {/* Late Arrival Threshold Settings Modal */}
