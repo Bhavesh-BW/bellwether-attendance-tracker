@@ -1059,7 +1059,7 @@ class CameraStreamPipeline:
 
             # ── 1. FAST SPATIAL TRACK MATCHING (O(1), <0.01 ms) ──
             best_track_id = None
-            best_iou = 0.0
+            best_iou = 0.20  # Minimum IoU floor: rejects incidental overlap between two crossing people
             for tid, trk in self.active_tracks.items():
                 if tid in matched_track_ids:
                     continue
@@ -1102,8 +1102,28 @@ class CameraStreamPipeline:
                 is_unresolved = not cur_vid or cur_vid in ('UNREGISTERED', 'UNTRACKED_EXIT')
 
                 if not is_unresolved:
+                    # Periodic biometric re-verification (once per second): prevents a track that
+                    # jumped to a different person from permanently inheriting the previous identity.
+                    if (now_epoch - trk.get('last_verify_epoch', 0)) >= 1.0:
+                        trk['last_verify_epoch'] = now_epoch
+                        v_ok, _ = self.engine._is_sharp_face_crop(face_crop, face, det_score)
+                        if v_ok:
+                            v_emb = self.engine._extract_embedding(frame, face)
+                            v_obj = self.engine.unique_cache_by_id.get(cur_vid)
+                            v_embs = (v_obj.get('embeddings') or [v_obj.get('embedding')]) if v_obj else []
+                            v_embs = [ve for ve in v_embs if ve is not None]
+                            if v_embs:
+                                if max(cosine_sim(v_emb, ve) for ve in v_embs) >= 0.55:
+                                    trk['verify_failures'] = 0
+                                else:
+                                    trk['verify_failures'] = trk.get('verify_failures', 0) + 1
+                                    if trk['verify_failures'] >= 3:
+                                        # Identity no longer matches — release the ID so re-identification runs
+                                        trk['visitor_id'] = None
+                                        trk['verify_failures'] = 0
+                                        is_unresolved = True
                     # Periodic Keyframe Crop Update (Only once every 20 seconds, zero cost on regular frames)
-                    if (now_epoch - trk.get('last_crop_epoch', 0)) >= 20.0 and face_crop is not None and face_crop.size > 0:
+                    if not is_unresolved and (now_epoch - trk.get('last_crop_epoch', 0)) >= 20.0 and face_crop is not None and face_crop.size > 0:
                         is_sharp, quality_score = self.engine._is_sharp_face_crop(face_crop, face, det_score)
                         if is_sharp and quality_score >= 32.0 and det_score >= 0.78:
                             vis_id = trk.get('visitor_id')
@@ -1112,21 +1132,33 @@ class CameraStreamPipeline:
                                 crops = v_obj.get('crops', [])
                                 if not isinstance(crops, list):
                                     crops = [crops] if crops else []
-                                # Auto-enrolled profiles keep only 1 single good face crop - never accumulate extra crops or redundant angles
-                                if not v_obj.get('is_enrolled') and len(crops) < 1:
-                                    ok, buf = cv2.imencode('.jpg', face_crop, [cv2.IMWRITE_JPEG_QUALITY, 88])
-                                    if ok:
-                                        face_b64 = f"data:image/jpeg;base64,{base64.b64encode(buf.tobytes()).decode()}"
-                                        if face_b64 not in crops:
-                                            crops.append(face_b64)
-                                            v_obj['crops'] = crops[:6]
-                                            trk['last_crop_epoch'] = now_epoch
-                                            self.engine.async_db_execute('UPDATE unique_visitors SET crops_json = ?, last_seen = ? WHERE id = ?', (json.dumps(crops[:6]), now_iso, vis_id))
+                                # Multi-angle enrollment: accumulate up to 6 crops / 8 embeddings,
+                                # each must be a NEW angle (max sim to existing < 0.90) so the
+                                # profile covers front + side + overhead views for cross-camera matching.
+                                if not v_obj.get('is_enrolled') and len(crops) < 6:
+                                    key_emb = self.engine._extract_embedding(frame, face)
+                                    key_vis_embs = [ve for ve in (v_obj.get('embeddings') or [v_obj.get('embedding')]) if ve is not None]
+                                    key_anchor = key_vis_embs[0] if key_vis_embs else None
+                                    key_pure = key_anchor is not None and cosine_sim(key_emb, key_anchor) >= 0.65
+                                    key_diverse = not key_vis_embs or max(cosine_sim(key_emb, ve) for ve in key_vis_embs) < 0.90
+                                    if key_pure and key_diverse:
+                                        ok, buf = cv2.imencode('.jpg', face_crop, [cv2.IMWRITE_JPEG_QUALITY, 88])
+                                        if ok:
+                                            face_b64 = f"data:image/jpeg;base64,{base64.b64encode(buf.tobytes()).decode()}"
+                                            if face_b64 not in crops:
+                                                crops.append(face_b64)
+                                                v_obj['crops'] = crops[:6]
+                                                trk['last_crop_epoch'] = now_epoch
+                                                if len(key_vis_embs) < 8:
+                                                    v_obj['embeddings'].append(key_emb)
+                                                    self.engine.add_to_gallery(v_obj, key_emb)
+                                                self.engine.async_db_execute('UPDATE unique_visitors SET crops_json = ?, last_seen = ? WHERE id = ?', (json.dumps(crops[:6]), now_iso, vis_id))
                     continue
                 if is_unresolved:
-                    # Throttle re-identification for unregistered / unresolved tracks to once every 1.5 seconds!
-                    # Prevents running 25 heavy neural network inferences per second per face when multiple non-staff or visitors walk by.
-                    if (now_epoch - trk.get('last_attempt_epoch', 0)) < 1.5:
+                    # Throttle re-identification for unregistered / unresolved tracks
+                    # (1.5s entry cameras, 1.0s exit — catch brief unobstructed face frames).
+                    _reid_interval = 1.0 if is_exit_camera else 1.5
+                    if (now_epoch - trk.get('last_attempt_epoch', 0)) < _reid_interval:
                         continue
                     trk['last_attempt_epoch'] = now_epoch
 
@@ -1169,6 +1201,7 @@ class CameraStreamPipeline:
                 return _cached_photo_b64[0]
 
             emb = self.engine._extract_embedding(frame, face)
+            reid_emb = self.engine._extract_reid_embedding(body_crop)
             instant_gender, gender_conf, age = self.engine._estimate_gender_and_age(frame, face, face_crop, self.camera_id, body_crop)
 
             face_b64 = ""
@@ -1176,6 +1209,7 @@ class CameraStreamPipeline:
             photo_b64 = ""
 
             matched_visitor = None
+            max_vis_sim = 0.0
             is_transit = False
             prev_cam_name = None
 
@@ -1255,6 +1289,8 @@ class CameraStreamPipeline:
                     is_exit=is_exit_camera,
                     org_id=cam_org
                 )
+                if is_exit_camera:
+                    print(f"[EXIT DEBUG] gallery match: vis={matched_visitor['id'] if matched_visitor else None} sim={max_vis_sim:.3f}")
                 # Secondary verification: confirm match against stored embeddings of this visitor
                 if matched_visitor is not None:
                     vis_embs = matched_visitor.get('embeddings', [matched_visitor.get('embedding')])
@@ -1262,10 +1298,20 @@ class CameraStreamPipeline:
                     if vis_embs:
                         all_sims = [cosine_sim(emb, ve) for ve in vis_embs]
                         max_indiv_sim = max(all_sims)
-                        min_crop_sim = 0.58 if matched_visitor.get('is_enrolled') else (0.58 if is_exit_camera else 0.55)
+                        min_crop_sim = 0.58 if matched_visitor.get('is_enrolled') else (0.55 if is_exit_camera else 0.55)
                         if max_indiv_sim < min_crop_sim:
+                            if is_exit_camera:
+                                print(f"[EXIT DEBUG] {matched_visitor['id']} dropped by secondary verify: {max_indiv_sim:.3f} < {min_crop_sim}")
                             matched_visitor = None
                             max_vis_sim = 0.0
+
+            # Person-ReID fallback: face failed (angle/occlusion) — match on body/clothing
+            if matched_visitor is None and reid_emb is not None:
+                reid_vis, reid_sim = self.engine.search_reid(reid_emb, threshold=0.72 if is_exit_camera else 0.78, org_id=cam_org)
+                if reid_vis is not None:
+                    matched_visitor = reid_vis
+                    max_vis_sim = reid_sim
+                    print(f"[REID MATCH] {reid_vis['id']} on {self.camera_id}: body_sim={reid_sim:.3f}")
 
             # Strict Presence Precondition on Exit Camera
             if is_exit_camera and matched_visitor is not None:
@@ -1276,11 +1322,13 @@ class CameraStreamPipeline:
                     bool(matched_visitor.get('today_check_in'))
                 )
                 if not is_active_today:
+                    print(f"[EXIT DEBUG] {matched_visitor['id']} dropped: not checked in today (status={matched_visitor.get('today_status')})")
                     matched_visitor = None
                 elif best_track_id is not None:
                     trk = self.active_tracks[best_track_id]
                     hits = trk.get('exit_concordant_hits', 0) + 1
                     trk['exit_concordant_hits'] = hits
+                    print(f"[EXIT DEBUG] {matched_visitor['id']} concordant hit {hits}/2")
                     if hits < 2:
                         continue
 
@@ -1289,7 +1337,7 @@ class CameraStreamPipeline:
                 # 1. Spatial-temporal corridor gate: if a profile was enrolled nearby in last 6s on this camera, it is the SAME walking person!
                 for prev_ep, prev_vid, prev_emb, prev_cam, prev_x, prev_y in getattr(self.engine, 'recent_auto_enrolled_locs', []):
                     if prev_cam == self.camera_id and (now_epoch - prev_ep) <= 6.0 and math.hypot(cx - prev_x, cy - prev_y) < 100.0:
-                        if prev_vid in self.engine.unique_cache_by_id:
+                        if cosine_sim(emb, prev_emb) >= 0.60 and prev_vid in self.engine.unique_cache_by_id:
                             cand_vis = self.engine.unique_cache_by_id[prev_vid]
                             if self.engine.is_org_match(cam_org, cand_vis.get('org_id')):
                                 matched_visitor = cand_vis
@@ -1369,6 +1417,7 @@ class CameraStreamPipeline:
                         'age': age or 28,
                         'embedding': emb,
                         'embeddings': [emb],
+                        'reid_embs': [reid_emb] if reid_emb is not None else [],
                         'last_seen': now_iso,
                         'last_seen_epoch': now_epoch,
                         'photo_b64': reg_avatar,
@@ -1383,6 +1432,8 @@ class CameraStreamPipeline:
                     self.engine.unique_cache.append(matched_visitor)
                     self.engine.unique_cache_by_id[visitor_id] = matched_visitor
                     self.engine.add_to_gallery(matched_visitor, emb)
+                    if reid_emb is not None:
+                        self.engine.add_reid_to_gallery(matched_visitor, reid_emb)
                     self.engine.sighting_cooldowns[(visitor_id, self.camera_id)] = now_epoch
                     if gender_locked_flag:
                         self.engine.locked_genders.add(visitor_id)
@@ -1627,16 +1678,22 @@ class CameraStreamPipeline:
                     if biometric_pure and is_sharp and quality_score >= 32.0 and det_score >= 0.78:
                         last_crop_epoch = matched_visitor.get('last_crop_epoch', 0)
                         crop_cooldown_ok = (now_epoch - last_crop_epoch) >= 20.0
-                        # Auto-enrolled profiles keep only 1 single good face crop - never accumulate extra crops or angles
-                        if not matched_visitor.get('is_enrolled') and crop_cooldown_ok and len(crops) < 1:
+                        # Multi-angle enrollment: up to 6 crops / 8 embeddings; new sample must
+                        # cover a NEW angle (max sim to existing < 0.90) for cross-camera robustness.
+                        emb_diverse = not vis_embs or max(cosine_sim(emb, ve) for ve in vis_embs) < 0.90
+                        if not matched_visitor.get('is_enrolled') and crop_cooldown_ok and len(crops) < 6 and emb_diverse:
                             face_b64 = get_face_b64()
                             if face_b64 and face_b64 not in crops:
                                 crops.append(face_b64)
                                 matched_visitor['crops'] = crops[:6]
                                 matched_visitor['last_crop_epoch'] = now_epoch
-                                if len(vis_embs) < 5:
+                                if len(vis_embs) < 8:
                                     matched_visitor['embeddings'].append(emb)
                                     self.engine.add_to_gallery(matched_visitor, emb)
+                                vis_reid = [r for r in (matched_visitor.get('reid_embs') or []) if r is not None]
+                                if reid_emb is not None and len(vis_reid) < 4 and (not vis_reid or max(cosine_sim(reid_emb, r) for r in vis_reid) < 0.95):
+                                    matched_visitor['reid_embs'].append(reid_emb)
+                                    self.engine.add_reid_to_gallery(matched_visitor, reid_emb)
                                 self.engine.async_db_execute(
                                     'UPDATE unique_visitors SET crops_json = ?, last_seen = ? WHERE id = ?',
                                     (json.dumps(crops[:6]), now_iso, visitor_id)
@@ -1942,7 +1999,7 @@ class CameraStreamPipeline:
             return
         h, w = frame.shape[:2]
         if self.hud_proc is None or self.hud_proc.poll() is not None:
-            is_server = os.environ.get('PORT') == '31030' or not os.name == 'nt'
+            is_server = os.environ.get('PORT') == '31030' or (os.name != 'nt' and os.path.exists('/etc/systemd'))
             target_port = 31554 if is_server else 8554
             rtsp_target = f"rtsp://127.0.0.1:{target_port}/{self.camera_id}_hud"
 
@@ -2050,6 +2107,21 @@ class FaceTrackerEngine:
                 print(f"ArcFace 512-d (w600k_mbf.onnx) loaded successfully into ONNX Runtime on [{active_p}] (GPU {cuda_dev})!")
             except Exception as e:
                 print("Failed to load ArcFace ONNX model:", e)
+
+        # Person Re-ID (OSNet x0.25, MSMT17): 512-d body/clothing embedding for
+        # cross-camera matching when face angle/occlusion makes ArcFace unreliable.
+        # Fixed batch size 16 — single crops are padded.
+        reid_path = str(MODELS / 'osnet_x0_25_msmt17.onnx')
+        self.reid_sess = None
+        self.reid_input_name = None
+        if os.path.exists(reid_path):
+            try:
+                import onnxruntime as ort
+                self.reid_sess = ort.InferenceSession(reid_path, providers=['CPUExecutionProvider'])
+                self.reid_input_name = self.reid_sess.get_inputs()[0].name
+                print("OSNet person-ReID 512-d (osnet_x0_25_msmt17.onnx) loaded into ONNX Runtime!")
+            except Exception as e:
+                print("Failed to load ReID ONNX model:", e)
 
         self.late_arrival_time = self._load_setting('late_arrival_time', '09:00')
         self.auto_enroll_by_org = {}
@@ -2368,6 +2440,36 @@ class FaceTrackerEngine:
                 if norm > 1e-6:
                     return feat / norm
         return feature.astype(np.float32)
+
+    def _extract_reid_embedding(self, body_crop: np.ndarray):
+        """512-d OSNet person-ReID embedding from a full-body crop.
+        Viewpoint-invariant: matches a person across cameras even when the face
+        is occluded, turned away, or too small for ArcFace. Input 256x128 RGB,
+        ImageNet normalization, fixed batch 16 (single crops are padded)."""
+        if getattr(self, 'reid_sess', None) is None or body_crop is None or body_crop.size == 0:
+            return None
+        try:
+            img = cv2.resize(body_crop, (128, 256))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            img = (img - np.array([0.485, 0.456, 0.406], np.float32)) / np.array([0.229, 0.224, 0.225], np.float32)
+            blob = np.zeros((16, 3, 256, 128), np.float32)
+            blob[0] = np.transpose(img, (2, 0, 1))
+            with self.inference_lock:
+                out = self.reid_sess.run(None, {self.reid_input_name: blob})[0][0]
+            norm = np.linalg.norm(out)
+            return (out / norm).astype(np.float32) if norm > 1e-6 else None
+        except Exception:
+            return None
+
+    def _extract_reid_b64(self, photo_b64: str):
+        if not photo_b64:
+            return None
+        try:
+            raw = photo_b64.split(',', 1)[1] if ',' in photo_b64 else photo_b64
+            img = cv2.imdecode(np.frombuffer(base64.b64decode(raw), dtype=np.uint8), cv2.IMREAD_COLOR)
+            return self._extract_reid_embedding(img)
+        except Exception:
+            return None
 
     def _is_sharp_face_crop(self, face_crop: np.ndarray, face_coords: np.ndarray, det_score: float):
         if face_crop is None or face_crop.size == 0:
@@ -2763,7 +2865,9 @@ class FaceTrackerEngine:
 
             if emb is not None:
                 vis_embeddings = [emb]
-                if is_blk or enr:
+                # Multi-angle reload: rebuild diverse-angle embeddings from stored crops
+                # for ALL profiles (auto-enrolled included) so angle coverage survives restart.
+                if crops:
                     for c_img in crops[:8]:
                         c_emb = self._extract_crop_embedding(c_img, anchor_emb=emb)
                         if c_emb is not None:
@@ -2774,8 +2878,16 @@ class FaceTrackerEngine:
                                     if not any((exist_e.shape == c_emb.shape and np.dot(c_emb, exist_e) > 0.98) for exist_e in vis_embeddings):
                                         vis_embeddings.append(c_emb)
 
+                # Person-ReID embedding rebuilt from stored full-body photo
+                reid_embs = []
+                if getattr(self, 'reid_sess', None) is not None:
+                    re = self._extract_reid_b64(r[4])
+                    if re is not None:
+                        reid_embs.append(re)
+
                 vis_obj = {
                     'id': vis_id,
+                    'reid_embs': reid_embs,
                     'emp_code': emp_c,
                     'name': r_name,
                     'department': dept,
@@ -2994,6 +3106,28 @@ class FaceTrackerEngine:
                 self.gallery_index = []
                 self.gallery_orgs = np.array([], dtype=object)
 
+            # Person-ReID matrix: one or more body embeddings per profile
+            r_rows, r_idx, r_orgs = [], [], []
+            for vis in self.unique_cache:
+                r_org = vis.get('org_id') or 'bellwether'
+                for re_ in (vis.get('reid_embs') or []):
+                    rf = np.asarray(re_, dtype=np.float32).flatten()
+                    if len(rf) != 512:
+                        continue
+                    rn = np.linalg.norm(rf)
+                    if rn > 1e-6:
+                        r_rows.append(rf / rn)
+                        r_idx.append(vis)
+                        r_orgs.append(r_org)
+            if r_rows:
+                self.reid_matrix = np.array(r_rows, dtype=np.float32)
+                self.reid_index = r_idx
+                self.reid_orgs = np.array(r_orgs, dtype=object)
+            else:
+                self.reid_matrix = None
+                self.reid_index = []
+                self.reid_orgs = np.array([], dtype=object)
+
     def rebuild_watchlist_index(self):
         with self.matrix_lock:
             expected_dim = 512 if getattr(self, 'arcface_sess', None) is not None else 128
@@ -3042,6 +3176,27 @@ class FaceTrackerEngine:
             if len(top_k_indices) == 0 or sims[top_k_indices[0]] < 0.0:
                 return None, 0.0
 
+            # Best similarity per distinct profile; rank-1 vs rank-2 margin rejects
+            # ambiguous matches that previously fused different people into one ID.
+            best_per_vis = {}
+            for idx in top_k_indices:
+                sim = float(sims[idx])
+                if sim < 0.0:
+                    break
+                vis = self.gallery_index[idx]
+                vid = vis.get('id')
+                if vid not in best_per_vis:
+                    best_per_vis[vid] = (vis, sim)
+
+            def _margin_ok(best_id, best_sim, floor):
+                # Ambiguity margin only applies when the runner-up is itself a
+                # plausible match (>= floor). A distant second candidate must not
+                # veto a clear rank-1 hit.
+                for vid, (_, s) in best_per_vis.items():
+                    if vid != best_id and s >= floor and best_sim - s < 0.04:
+                        return False
+                return True
+
             # -----------------------------------------------------------------
             # TIER 1: ENROLLED HOSPITAL STAFF PRIORITY (ArcFace 512-d / SFace 128-d)
             # Doctors, consultants, nurses, and registered personnel.
@@ -3049,7 +3204,7 @@ class FaceTrackerEngine:
             # -----------------------------------------------------------------
             best_enrolled_vis = None
             best_enrolled_sim = 0.0
-            enr_threshold = 0.65 if is_exit else 0.58
+            enr_threshold = 0.60 if is_exit else 0.58
             for idx in top_k_indices:
                 sim = float(sims[idx])
                 if sim < 0.0:
@@ -3071,16 +3226,20 @@ class FaceTrackerEngine:
                     best_enrolled_sim = sim
 
             if best_enrolled_vis is not None:
-                return best_enrolled_vis, best_enrolled_sim
+                if _margin_ok(best_enrolled_vis.get('id'), best_enrolled_sim, enr_threshold):
+                    return best_enrolled_vis, best_enrolled_sim
+                return None, 0.0
 
             # -----------------------------------------------------------------
             # EXIT CAMERA: If no enrolled staff matched, match auto-enrolled visitor
-            # with calibrated confidence (>= 0.62).
+            # with calibrated confidence (>= 0.55) + rank-1/rank-2 margin.
             # -----------------------------------------------------------------
             if is_exit:
+                top3 = sorted(best_per_vis.items(), key=lambda kv: kv[1][1], reverse=True)[:3]
+                print(f"[EXIT GALLERY] top candidates: " + ", ".join(f"{v}={s:.3f}" for v, (_, s) in top3))
                 for idx in top_k_indices:
                     sim = float(sims[idx])
-                    if sim < 0.62:
+                    if sim < 0.55:
                         break
                     vis = self.gallery_index[idx]
                     if org_id and org_id != 'all' and not self.is_org_match(org_id, vis.get('org_id')):
@@ -3088,12 +3247,16 @@ class FaceTrackerEngine:
                     cand_gender = vis.get('gender')
                     if query_gender and cand_gender and vis.get('gender_locked') and cand_gender != query_gender:
                         continue
-                    return vis, sim
+                    if _margin_ok(vis.get('id'), sim, 0.55):
+                        return vis, sim
+                    print(f"[EXIT GALLERY] {vis.get('id')} rejected by margin")
+                    return None, 0.0
                 return None, 0.0
 
             # -----------------------------------------------------------------
             # TIER 2: AUTO-ENROLLED PROFILES (ENTRY / INBOUND ONLY)
             # -----------------------------------------------------------------
+
             # 1. Temporal Corridor Priority: If seen nearby in recent_seconds (15 mins), match with corridor threshold
             for idx in top_k_indices:
                 sim = float(sims[idx])
@@ -3109,7 +3272,9 @@ class FaceTrackerEngine:
 
                 last_seen_epoch = vis.get('last_seen_epoch', 0)
                 if (now_epoch - last_seen_epoch) <= recent_seconds:
-                    return vis, sim
+                    if _margin_ok(vis.get('id'), sim, recent_threshold):
+                        return vis, sim
+                    return None, 0.0
 
             # 2. General Historical Gallery Match
             for idx in top_k_indices:
@@ -3122,9 +3287,47 @@ class FaceTrackerEngine:
                 cand_gender = vis.get('gender')
                 if query_gender and cand_gender and vis.get('gender_locked') and cand_gender != query_gender:
                     continue
-                return vis, sim
+                if _margin_ok(vis.get('id'), sim, threshold):
+                    return vis, sim
+                return None, 0.0
 
             return None, 0.0
+
+    def search_reid(self, emb: np.ndarray, threshold: float = 0.72, org_id: str = None):
+        """Person-ReID gallery search. Returns (vis, sim) when the best profile
+        clears the threshold with a 0.05 margin over the runner-up."""
+        with self.matrix_lock:
+            if getattr(self, 'reid_matrix', None) is None or len(self.reid_index) == 0 or emb is None:
+                return None, 0.0
+            ef = np.asarray(emb, dtype=np.float32).flatten()
+            norm = np.linalg.norm(ef)
+            if norm < 1e-6:
+                return None, 0.0
+            sims = np.dot(self.reid_matrix, ef / norm)
+            if org_id and org_id != 'all' and len(self.reid_orgs) == len(sims):
+                org_mask = np.array([self.is_org_match(org_id, o) for o in self.reid_orgs], dtype=bool)
+                if not np.any(org_mask):
+                    return None, 0.0
+                sims = np.where(org_mask, sims, -1.0)
+            best_per_vis = {}
+            for i in np.argsort(sims)[::-1][:30]:
+                s = float(sims[i])
+                if s < 0.0:
+                    break
+                vis = self.reid_index[i]
+                vid = vis.get('id')
+                if vid not in best_per_vis:
+                    best_per_vis[vid] = (vis, s)
+            if not best_per_vis:
+                return None, 0.0
+            ranked = sorted(best_per_vis.items(), key=lambda kv: kv[1][1], reverse=True)
+            best_vid, (best_vis, best_sim) = ranked[0]
+            if best_sim < threshold:
+                return None, best_sim
+            for vid, (_, s) in ranked[1:]:
+                if s >= threshold and best_sim - s < 0.05:
+                    return None, best_sim
+            return best_vis, best_sim
 
     def search_watchlist(self, emb: np.ndarray, threshold: float = 0.60):
         with self.matrix_lock:
@@ -3171,6 +3374,31 @@ class FaceTrackerEngine:
                     self.gallery_matrix = row
                     self.gallery_index = [vis]
                     self.gallery_orgs = np.array([v_org], dtype=object)
+
+    def add_reid_to_gallery(self, vis: dict, emb: np.ndarray):
+        """Add one person-ReID embedding row (max 4 per visitor)."""
+        with self.matrix_lock:
+            if emb is None:
+                return
+            rf = np.asarray(emb, dtype=np.float32).flatten()
+            if len(rf) != 512:
+                return
+            n = np.linalg.norm(rf)
+            if n < 1e-6:
+                return
+            vis_id = vis.get('id', '')
+            if sum(1 for v in getattr(self, 'reid_index', []) if v.get('id') == vis_id) >= 4:
+                return
+            row = (rf / n).reshape(1, 512)
+            v_org = vis.get('org_id') or 'bellwether'
+            if getattr(self, 'reid_matrix', None) is not None:
+                self.reid_matrix = np.vstack([self.reid_matrix, row])
+                self.reid_index.append(vis)
+                self.reid_orgs = np.append(self.reid_orgs, v_org)
+            else:
+                self.reid_matrix = row
+                self.reid_index = [vis]
+                self.reid_orgs = np.array([v_org], dtype=object)
 
 
     def get_next_employee_id(self):
