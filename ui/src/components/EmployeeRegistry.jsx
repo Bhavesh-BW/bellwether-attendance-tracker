@@ -50,6 +50,14 @@ const ROLES = [
   'Security Officer', 'Intern', 'Specialist'
 ];
 
+const SHIFT_PRESETS = [
+  { id: 'General Shift', label: 'General Shift (09:00 AM - 06:00 PM)', start: '09:00', end: '18:00' },
+  { id: 'Morning Shift', label: 'Morning Shift (07:00 AM - 03:00 PM)', start: '07:00', end: '15:00' },
+  { id: 'Evening Shift', label: 'Evening Shift (03:00 PM - 11:00 PM)', start: '15:00', end: '23:00' },
+  { id: 'Night Shift', label: 'Night Shift (11:00 PM - 07:00 AM)', start: '23:00', end: '07:00' },
+  { id: 'Custom', label: 'Custom Timing...', start: '09:00', end: '18:00' }
+];
+
 const fmtTime = (ts) => {
   if (!ts) return '—';
   if (typeof ts === 'string' && /am|pm/i.test(ts)) return ts;
@@ -170,7 +178,16 @@ export default function EmployeeRegistry({
   const [zoneCameraFilter, setZoneCameraFilter] = useState('all');
   const [zoneDateFilter, setZoneDateFilter] = useState('');
   const [editingEmployeeModal, setEditingEmployeeModal] = useState(null);
-  const [editEmployeeForm, setEditEmployeeForm] = useState({ name: '', department: '', designation: '', restricted_cameras: [] });
+  const [editEmployeeForm, setEditEmployeeForm] = useState({
+    name: '',
+    department: '',
+    designation: '',
+    restricted_cameras: [],
+    shift_name: 'General Shift',
+    shift_start: '09:00',
+    shift_end: '18:00',
+    early_threshold_mins: 30
+  });
   const [editEmployeeCrops, setEditEmployeeCrops] = useState([]);
   const [isEditPhotoLoading, setIsEditPhotoLoading] = useState(false);
   const editAddPhotoInputRef = React.useRef(null);
@@ -272,7 +289,11 @@ export default function EmployeeRegistry({
       name: v.name || v.display_name || '',
       department: v.department || 'General Staff',
       designation: v.designation || 'Staff Member',
-      restricted_cameras: Array.isArray(restr) ? [...restr] : []
+      restricted_cameras: Array.isArray(restr) ? [...restr] : [],
+      shift_name: v.shift_name || 'General Shift',
+      shift_start: v.shift_start || '09:00',
+      shift_end: v.shift_end || '18:00',
+      early_threshold_mins: v.early_threshold_mins !== undefined ? v.early_threshold_mins : 30
     });
   };
 
@@ -289,12 +310,16 @@ export default function EmployeeRegistry({
           name: editEmployeeForm.name || undefined,
           department: editEmployeeForm.department,
           designation: editEmployeeForm.designation,
-          restricted_cameras: editEmployeeForm.restricted_cameras
+          restricted_cameras: editEmployeeForm.restricted_cameras,
+          shift_name: editEmployeeForm.shift_name || 'General Shift',
+          shift_start: editEmployeeForm.shift_start || '09:00',
+          shift_end: editEmployeeForm.shift_end || '18:00',
+          early_threshold_mins: parseInt(editEmployeeForm.early_threshold_mins, 10) || 30
         })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Update failed');
-      showNotice(`✓ Updated zone permissions for ${editEmployeeForm.name || editingEmployeeModal.id}`);
+      showNotice(`✓ Updated profile & shift details for ${editEmployeeForm.name || editingEmployeeModal.id}`);
       setEditingEmployeeModal(null);
       if (onDataRefresh) onDataRefresh();
     } catch (err) {
@@ -773,7 +798,7 @@ export default function EmployeeRegistry({
   const [editForm, setEditForm] = useState({});
   const [saving, setSaving] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [addForm, setAddForm] = useState({ name: '', department: 'General Staff', designation: 'Staff Member', employee_id: '' });
+  const [addForm, setAddForm] = useState({ name: '', department: 'General Staff', designation: 'Staff Member', employee_id: '', shift_name: 'General Shift', shift_start: '09:00', shift_end: '18:00', early_threshold_mins: 30 });
   const [facePhotos, setFacePhotos] = useState([]);
   const [adding, setAdding] = useState(false);
   const [notice, setNotice] = useState(null);
@@ -1054,7 +1079,15 @@ export default function EmployeeRegistry({
   const startEdit = (v, e) => {
     if (e) e.stopPropagation();
     setEditingId(v.id);
-    setEditForm({ name: v.name || v.display_name || '', department: v.department || 'General Staff', designation: v.designation || 'Staff Member' });
+    setEditForm({
+      name: v.name || v.display_name || '',
+      department: v.department || 'General Staff',
+      designation: v.designation || 'Staff Member',
+      shift_name: v.shift_name || 'General Shift',
+      shift_start: v.shift_start || '09:00',
+      shift_end: v.shift_end || '18:00',
+      early_threshold_mins: v.early_threshold_mins !== undefined ? v.early_threshold_mins : 30
+    });
   };
 
   const cancelEdit = (e) => {
@@ -1070,7 +1103,16 @@ export default function EmployeeRegistry({
       const res = await fetch('/api/employees/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ employee_id: empId, name: editForm.name || undefined, department: editForm.department, designation: editForm.designation })
+        body: JSON.stringify({
+          employee_id: empId,
+          name: editForm.name || undefined,
+          department: editForm.department,
+          designation: editForm.designation,
+          shift_name: editForm.shift_name || 'General Shift',
+          shift_start: editForm.shift_start || '09:00',
+          shift_end: editForm.shift_end || '18:00',
+          early_threshold_mins: parseInt(editForm.early_threshold_mins, 10) || 30
+        })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
@@ -1106,14 +1148,18 @@ export default function EmployeeRegistry({
           designation: addForm.designation,
           photo_b64: facePhotos[0] || undefined,
           photos_b64: facePhotos.length > 0 ? facePhotos : undefined,
-          org_id: activeOrgId || undefined
+          org_id: activeOrgId || undefined,
+          shift_name: addForm.shift_name || 'General Shift',
+          shift_start: addForm.shift_start || '09:00',
+          shift_end: addForm.shift_end || '18:00',
+          early_threshold_mins: parseInt(addForm.early_threshold_mins, 10) || 30
         })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Enroll failed');
       const assignedName = data.employee?.name || data.employee?.id || empName;
       showNotice(`✓ Added & enrolled profile ${assignedName} with ${facePhotos.length || 1} angle biometric vector(s)`);
-      setAddForm({ name: '', department: 'General Staff', designation: 'Staff Member', employee_id: '' });
+      setAddForm({ name: '', department: 'General Staff', designation: 'Staff Member', employee_id: '', shift_name: 'General Shift', shift_start: '09:00', shift_end: '18:00', early_threshold_mins: 30 });
       clearPhotos();
       setAddOpen(false);
       setSortBy('latest_seen');
@@ -1538,6 +1584,51 @@ export default function EmployeeRegistry({
                   style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px', backgroundColor: '#fff', outline: 'none', cursor: 'pointer' }}>
                   {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
                 </select>
+              </div>
+
+              {/* Shift Timings */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                <label style={{ fontSize: '11px', fontWeight: '700', color: '#475569' }}>Shift Preset</label>
+                <select
+                  value={addForm.shift_name || 'General Shift'}
+                  onChange={e => {
+                    const preset = SHIFT_PRESETS.find(p => p.id === e.target.value);
+                    if (preset && preset.id !== 'Custom') {
+                      setAddForm(prev => ({
+                        ...prev,
+                        shift_name: preset.id,
+                        shift_start: preset.start,
+                        shift_end: preset.end
+                      }));
+                    } else {
+                      setAddForm(prev => ({ ...prev, shift_name: 'Custom' }));
+                    }
+                  }}
+                  style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px', backgroundColor: '#fff', outline: 'none', cursor: 'pointer' }}
+                >
+                  {SHIFT_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </select>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <label style={{ fontSize: '11px', fontWeight: '700', color: '#475569' }}>Shift Start</label>
+                  <input
+                    type="time"
+                    value={addForm.shift_start || '09:00'}
+                    onChange={e => setAddForm(prev => ({ ...prev, shift_start: e.target.value }))}
+                    style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px', backgroundColor: '#fff', outline: 'none' }}
+                  />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <label style={{ fontSize: '11px', fontWeight: '700', color: '#475569' }}>Shift End</label>
+                  <input
+                    type="time"
+                    value={addForm.shift_end || '18:00'}
+                    onChange={e => setAddForm(prev => ({ ...prev, shift_end: e.target.value }))}
+                    style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px', backgroundColor: '#fff', outline: 'none' }}
+                  />
+                </div>
               </div>
 
               {/* Face Photos Multi-Angle Upload (Min 2, Max 6) */}
@@ -1977,7 +2068,7 @@ export default function EmployeeRegistry({
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
               <thead>
                 <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
-                  {['Employee ID', 'Name / Status', 'Department', 'Role', 'Today In', 'Last Sighting', 'Today Out', 'Duty Hours', 'Actions'].map(h => (
+                  {['Employee ID', 'Name / Status', 'Department', 'Role', 'Assigned Shift', 'Today In', 'Last Sighting', 'Today Out', 'Duty Hours', 'Actions'].map(h => (
                     <th key={h} style={{ padding: '10px 14px', fontSize: '11px', fontWeight: '800', color: '#475569', whiteSpace: 'nowrap' }}>{h}</th>
                   ))}
                 </tr>
@@ -1995,7 +2086,7 @@ export default function EmployeeRegistry({
                     </td>
                   </tr>
                 ) : paged.length === 0 ? (
-                  <tr><td colSpan="9" style={{ padding: '32px', textAlign: 'center', color: '#94a3b8' }}>No employees match the current filter.</td></tr>
+                  <tr><td colSpan="10" style={{ padding: '32px', textAlign: 'center', color: '#94a3b8' }}>No employees match the current filter.</td></tr>
                 ) : paged.map((v, idx) => {
                   const isEnrolled = Boolean(v.is_enrolled);
                   const isCheckedOut = Boolean(v.today_check_in && (v.today_status === 'CHECKED OUT' || v.is_checkout_verified));
@@ -2135,6 +2226,69 @@ export default function EmployeeRegistry({
                           </select>
                         ) : (
                           <span style={{ color: '#475569' }}>{v.designation || 'Staff Member'}</span>
+                        )}
+                      </td>
+
+                      {/* Assigned Shift */}
+                      <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                        {isEditing ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }} onClick={e => e.stopPropagation()}>
+                            <select
+                              value={editForm.shift_name || 'General Shift'}
+                              onChange={e => {
+                                const preset = SHIFT_PRESETS.find(p => p.id === e.target.value);
+                                if (preset && preset.id !== 'Custom') {
+                                  setEditForm(p => ({
+                                    ...p,
+                                    shift_name: preset.id,
+                                    shift_start: preset.start,
+                                    shift_end: preset.end
+                                  }));
+                                } else {
+                                  setEditForm(p => ({ ...p, shift_name: 'Custom' }));
+                                }
+                              }}
+                              style={{ padding: '3px 6px', borderRadius: '4px', border: '1px solid #93c5fd', fontSize: '11px', backgroundColor: '#fff', outline: 'none' }}
+                            >
+                              {SHIFT_PRESETS.map(p => <option key={p.id} value={p.id}>{p.id}</option>)}
+                            </select>
+                            <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                              <input
+                                type="time"
+                                value={editForm.shift_start || '09:00'}
+                                onChange={e => setEditForm(p => ({ ...p, shift_start: e.target.value }))}
+                                style={{ padding: '2px 4px', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '10px' }}
+                              />
+                              <span style={{ fontSize: '10px', color: '#94a3b8' }}>-</span>
+                              <input
+                                type="time"
+                                value={editForm.shift_end || '18:00'}
+                                onChange={e => setEditForm(p => ({ ...p, shift_end: e.target.value }))}
+                                style={{ padding: '2px 4px', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '10px' }}
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              fontSize: '11px',
+                              fontWeight: '700',
+                              backgroundColor: '#f0fdf4',
+                              color: '#15803d',
+                              border: '1px solid #bbf7d0',
+                              width: 'fit-content'
+                            }}>
+                              🕒 {v.shift_name || 'General Shift'}
+                            </span>
+                            <span style={{ fontSize: '10px', color: '#64748b', fontFamily: 'var(--font-mono)' }}>
+                              {v.shift_start || '09:00'} – {v.shift_end || '18:00'}
+                            </span>
+                          </div>
                         )}
                       </td>
 
@@ -6283,6 +6437,136 @@ export default function EmployeeRegistry({
                 </div>
               </div>
 
+              {/* ASSIGNED SHIFT & SHIFT TIMINGS SECTION */}
+              <div style={{
+                marginBottom: '16px',
+                padding: '14px',
+                backgroundColor: '#f8fafc',
+                borderRadius: '8px',
+                border: '1px solid #e2e8f0'
+              }}>
+                <h4 style={{
+                  margin: '0 0 10px 0',
+                  fontSize: '12px',
+                  fontWeight: '800',
+                  color: '#0f172a',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}>
+                  🕒 Assigned Shift & Shift Timings
+                </h4>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr 1fr', gap: '10px' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>
+                      Shift Preset
+                    </label>
+                    <select
+                      value={editEmployeeForm.shift_name || 'General Shift'}
+                      onChange={e => {
+                        const val = e.target.value;
+                        const preset = SHIFT_PRESETS.find(p => p.id === val);
+                        if (preset && preset.id !== 'Custom') {
+                          setEditEmployeeForm(prev => ({
+                            ...prev,
+                            shift_name: preset.id,
+                            shift_start: preset.start,
+                            shift_end: preset.end
+                          }));
+                        } else {
+                          setEditEmployeeForm(prev => ({
+                            ...prev,
+                            shift_name: val
+                          }));
+                        }
+                      }}
+                      style={{
+                        width: '100%',
+                        padding: '7px 8px',
+                        borderRadius: '8px',
+                        border: '1px solid #cbd5e1',
+                        fontSize: '12px',
+                        backgroundColor: '#fff',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    >
+                      {SHIFT_PRESETS.map(p => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>
+                      Shift Start
+                    </label>
+                    <input
+                      type="time"
+                      value={editEmployeeForm.shift_start || '09:00'}
+                      onChange={e => setEditEmployeeForm(prev => ({ ...prev, shift_start: e.target.value, shift_name: 'Custom' }))}
+                      style={{
+                        width: '100%',
+                        padding: '7px 8px',
+                        borderRadius: '8px',
+                        border: '1px solid #cbd5e1',
+                        fontSize: '12px',
+                        backgroundColor: '#fff',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>
+                      Shift End
+                    </label>
+                    <input
+                      type="time"
+                      value={editEmployeeForm.shift_end || '18:00'}
+                      onChange={e => setEditEmployeeForm(prev => ({ ...prev, shift_end: e.target.value, shift_name: 'Custom' }))}
+                      style={{
+                        width: '100%',
+                        padding: '7px 8px',
+                        borderRadius: '8px',
+                        border: '1px solid #cbd5e1',
+                        fontSize: '12px',
+                        backgroundColor: '#fff',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }} title="Alert if check-in is earlier than shift start by this many minutes">
+                      Early Alert (m)
+                    </label>
+                    <input
+                      type="number"
+                      min="5"
+                      max="180"
+                      value={editEmployeeForm.early_threshold_mins !== undefined ? editEmployeeForm.early_threshold_mins : 30}
+                      onChange={e => setEditEmployeeForm(prev => ({ ...prev, early_threshold_mins: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        padding: '7px 8px',
+                        borderRadius: '8px',
+                        border: '1px solid #cbd5e1',
+                        fontSize: '12px',
+                        backgroundColor: '#fff',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+
               {/* RESTRICTED CAMERAS CHECKPOINTS SECTION */}
               <div style={{
                 marginTop: '6px',
@@ -6393,7 +6677,7 @@ export default function EmployeeRegistry({
                     boxShadow: '0 2px 4px rgba(2, 132, 199, 0.25)'
                   }}
                 >
-                  {savingEmployeeEdit ? 'Saving Changes...' : 'Save Permissions'}
+                  {savingEmployeeEdit ? 'Saving Changes...' : 'Save Profile & Shift'}
                 </button>
               </div>
             </form>
