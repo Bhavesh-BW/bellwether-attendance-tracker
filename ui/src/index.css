@@ -185,10 +185,21 @@ button {
   }
 }
 
+@media (min-width: 1200px) {
+  .kpi-cards-grid.kpi-cards-grid-security {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px;
+  }
+}
+
 @media (min-width: 1400px) {
   .kpi-cards-grid {
     grid-template-columns: repeat(8, minmax(0, 1fr));
     gap: 8px;
+  }
+  .kpi-cards-grid.kpi-cards-grid-security {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px;
   }
 }
 

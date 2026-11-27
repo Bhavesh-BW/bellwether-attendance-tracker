@@ -559,6 +559,9 @@ export default function EmployeeRegistry({
       if (ledgerStatusFilter === 'on_duty' && e.status !== 'On Duty') return false;
       if (ledgerStatusFilter === 'checked_out' && e.status !== 'Checked Out') return false;
       if (ledgerStatusFilter === 'absent' && e.status !== 'Absent') return false;
+      if (ledgerStatusFilter === 'early' && !e.is_early_checkin) return false;
+      if (ledgerStatusFilter === 'late_in' && !e.is_late_arrival) return false;
+      if (ledgerStatusFilter === 'late_exit' && !e.is_late_night_exit) return false;
       if (ledgerSearch.trim()) {
         const q = ledgerSearch.toLowerCase();
         const id = (e.employee_id || e.id || '').toLowerCase();
@@ -2362,6 +2365,18 @@ export default function EmployeeRegistry({
                 <div style={{ fontSize: '16px', fontWeight: '800', color: '#64748b' }}>{ledgerData?.summary?.absent_count ?? 0}</div>
                 <div style={{ fontSize: '10px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase' }}>Absent</div>
               </div>
+              <div style={{ textAlign: 'center', padding: '6px 12px', backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #fde68a', minWidth: '70px' }}>
+                <div style={{ fontSize: '16px', fontWeight: '800', color: '#b45309' }}>{ledgerData?.summary?.early_checkin_count ?? 0}</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', color: '#b45309', textTransform: 'uppercase' }}>⚡ Early In</div>
+              </div>
+              <div style={{ textAlign: 'center', padding: '6px 12px', backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #fed7aa', minWidth: '70px' }}>
+                <div style={{ fontSize: '16px', fontWeight: '800', color: '#c2410c' }}>{ledgerData?.summary?.late_arrivals_count ?? ledgerData?.employees?.filter(e => e.is_late_arrival).length ?? 0}</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', color: '#c2410c', textTransform: 'uppercase' }}>⚠️ Late In</div>
+              </div>
+              <div style={{ textAlign: 'center', padding: '6px 12px', backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #fca5a5', minWidth: '70px' }}>
+                <div style={{ fontSize: '16px', fontWeight: '800', color: '#991b1b' }}>{ledgerData?.summary?.late_night_exit_count ?? 0}</div>
+                <div style={{ fontSize: '10px', fontWeight: '700', color: '#991b1b', textTransform: 'uppercase' }}>🌙 Late Exit</div>
+              </div>
               <div style={{ textAlign: 'center', padding: '6px 14px', backgroundColor: '#0f766e', borderRadius: '8px', color: '#ffffff', minWidth: '85px' }}>
                 <div style={{ fontSize: '16px', fontWeight: '800' }}>{ledgerData?.summary?.avg_working_str ?? '0h 00m'}</div>
                 <div style={{ fontSize: '10px', fontWeight: '700', opacity: 0.9, textTransform: 'uppercase' }}>Avg Working</div>
@@ -2420,7 +2435,10 @@ export default function EmployeeRegistry({
                   ['auto', `Auto ID (${ledgerAutoCount})`],
                   ['on_duty', `🟢 On Duty (${ledgerData?.summary?.on_duty_count ?? 0})`],
                   ['checked_out', `✓ Checked Out (${ledgerData?.summary?.checked_out_count ?? 0})`],
-                  ['absent', `⚪ Absent (${ledgerData?.summary?.absent_count ?? 0})`]
+                  ['absent', `⚪ Absent (${ledgerData?.summary?.absent_count ?? 0})`],
+                  ['early', `⚡ Early In (${ledgerData?.employees?.filter(e => e.is_early_checkin).length ?? 0})`],
+                  ['late_in', `⚠️ Late In (${ledgerData?.summary?.late_arrivals_count ?? ledgerData?.employees?.filter(e => e.is_late_arrival).length ?? 0})`],
+                  ['late_exit', `🌙 Late Night (${ledgerData?.employees?.filter(e => e.is_late_night_exit).length ?? 0})`]
                 ].map(([sid, slabel]) => (
                   <button
                     key={sid}
@@ -2701,9 +2719,45 @@ export default function EmployeeRegistry({
 
                         {/* First In */}
                         <td style={{ padding: '10px 14px' }}>
-                          <div style={{ fontFamily: 'var(--font-mono)', fontWeight: '700', color: '#0369a1' }}>
+                          <div style={{ fontFamily: 'var(--font-mono)', fontWeight: '700', color: emp.is_late_arrival ? '#c2410c' : '#0369a1' }}>
                             {emp.check_in_display || '—'}
                           </div>
+                          {emp.is_early_checkin && (
+                            <div style={{ marginTop: '2px' }}>
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                                padding: '1px 6px',
+                                borderRadius: '4px',
+                                backgroundColor: '#fef3c7',
+                                color: '#b45309',
+                                fontSize: '9px',
+                                fontWeight: '800',
+                                border: '1px solid #fde68a'
+                              }} title={`Early arrival before shift start: ${emp.early_duration_str}`}>
+                                ⚡ Early (-{emp.early_duration_str})
+                              </span>
+                            </div>
+                          )}
+                          {emp.is_late_arrival && (
+                            <div style={{ marginTop: '2px' }}>
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                                padding: '1px 6px',
+                                borderRadius: '4px',
+                                backgroundColor: '#fff7ed',
+                                color: '#c2410c',
+                                fontSize: '9px',
+                                fontWeight: '800',
+                                border: '1px solid #fed7aa'
+                              }} title={`Late arrival past shift start: ${emp.late_duration_str || `${emp.late_minutes}m`}`}>
+                                ⚠️ Late (+{emp.late_duration_str || `${emp.late_minutes}m`})
+                              </span>
+                            </div>
+                          )}
                           <div style={{ fontSize: '10px', marginTop: '2px' }}>
                             {emp.is_check_in_manual ? (
                               <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', padding: '1px 5px', borderRadius: '4px', backgroundColor: '#eff6ff', color: '#1d4ed8', fontWeight: '700', border: '1px solid #bfdbfe' }}>
@@ -2724,6 +2778,24 @@ export default function EmployeeRegistry({
                           }}>
                             {isCheckedOut ? (emp.check_out_display || '—') : (isOnDuty ? '● Shift Ongoing' : '—')}
                           </div>
+                          {emp.is_late_night_exit && (
+                            <div style={{ marginTop: '2px' }}>
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                                padding: '1px 6px',
+                                borderRadius: '4px',
+                                backgroundColor: '#fee2e2',
+                                color: '#991b1b',
+                                fontSize: '9px',
+                                fontWeight: '800',
+                                border: '1px solid #fca5a5'
+                              }} title={`Late night departure after midnight: ${emp.late_exit_time_str}`}>
+                                🌙 Late Night Exit ({emp.late_exit_time_str})
+                              </span>
+                            </div>
+                          )}
                           <div style={{ fontSize: '10px', marginTop: '2px' }}>
                             {emp.is_check_out_manual ? (
                               <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', padding: '1px 5px', borderRadius: '4px', backgroundColor: '#eff6ff', color: '#1d4ed8', fontWeight: '700', border: '1px solid #bfdbfe' }}>

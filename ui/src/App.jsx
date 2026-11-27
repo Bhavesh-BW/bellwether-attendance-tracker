@@ -893,43 +893,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Period Selector */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            backgroundColor: '#ffffff',
-            border: isPeriodLoading ? '1px solid #38bdf8' : '1px solid var(--border-light)',
-            padding: '5px 12px',
-            borderRadius: '8px',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
-            transition: 'border-color 0.15s ease'
-          }}>
-            <span style={{ fontSize: '12px', fontWeight: '700', color: 'var(--text-muted)' }}>Period:</span>
-            <select
-              value={trendRange}
-              onChange={(e) => handleTrendRangeChange(e.target.value)}
-              style={{
-                border: 'none',
-                backgroundColor: 'transparent',
-                fontSize: '12px',
-                fontWeight: '700',
-                color: '#0284c7',
-                cursor: 'pointer',
-                outline: 'none',
-                padding: '2px 0'
-              }}
-            >
-              <option value="today">• Today (Live Shift)</option>
-              <option value="yesterday">Yesterday</option>
-              <option value="7d">Past 7 Days</option>
-              <option value="30d">Past 30 Days</option>
-            </select>
-            {isPeriodLoading && (
-              <LoadingSpinner size={13} color="#0284c7" />
-            )}
-          </div>
-
           {/* Sound Toggle */}
           <button
             type="button"
