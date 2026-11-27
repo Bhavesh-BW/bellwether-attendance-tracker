@@ -2775,7 +2775,7 @@ export default function EmployeeRegistry({
                   <th style={{ padding: '10px 14px', fontWeight: '800' }}>Working Time</th>
                   <th style={{ padding: '10px 14px', fontWeight: '800' }}>Break Time</th>
                   <th style={{ padding: '10px 14px', fontWeight: '800' }}>Shift Span</th>
-                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Productivity</th>
+                  <th style={{ padding: '10px 14px', fontWeight: '800' }}>Shift Timing</th>
                   <th style={{ padding: '10px 14px', fontWeight: '800' }}>Passages</th>
                   <th style={{ padding: '10px 14px', fontWeight: '800' }}>Quick Actions</th>
                 </tr>
@@ -2857,13 +2857,28 @@ export default function EmployeeRegistry({
                                   </span>
                                 )}
                               </div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px', flexWrap: 'wrap' }}>
                                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#0284c7', fontWeight: '700' }}>
                                   {emp.employee_id}
                                 </span>
                                 <span style={{ color: '#cbd5e1' }}>•</span>
                                 <span style={{ fontSize: '11px', color: '#64748b' }}>
                                   {emp.department}
+                                </span>
+                                <span style={{ color: '#cbd5e1' }}>•</span>
+                                <span style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '3px',
+                                  fontSize: '11px',
+                                  fontWeight: '700',
+                                  color: '#0f766e',
+                                  backgroundColor: '#f0fdfa',
+                                  padding: '1px 6px',
+                                  borderRadius: '4px',
+                                  border: '1px solid #ccfbf1'
+                                }}>
+                                  🕒 {emp.shift_timing_display || (emp.shift_start && emp.shift_end ? `${emp.shift_start} - ${emp.shift_end}` : '09:00 AM - 06:00 PM')}
                                 </span>
                               </div>
                             </div>
@@ -3040,24 +3055,29 @@ export default function EmployeeRegistry({
                           {emp.shift_span_str || '—'}
                         </td>
 
-                        {/* Productivity */}
+                        {/* Shift Timing */}
                         <td style={{ padding: '10px 14px' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                            <span style={{
-                              padding: '2px 7px',
-                              borderRadius: '6px',
-                              fontSize: '11px',
-                              fontWeight: '800',
-                              backgroundColor: prodBg,
-                              color: prodColor,
-                              border: `1px solid ${prodColor}33`
-                            }}>
-                              {prod}%
-                            </span>
-                          </div>
-                          <div style={{ width: '48px', height: '4px', backgroundColor: '#e2e8f0', borderRadius: '2px', overflow: 'hidden', marginTop: '3px' }}>
-                            <div style={{ width: `${Math.min(100, prod)}%`, height: '100%', backgroundColor: prodColor }}></div>
-                          </div>
+                          <span style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            backgroundColor: '#f0fdfa',
+                            color: '#0f766e',
+                            border: '1px solid #ccfbf1',
+                            fontSize: '11px',
+                            fontWeight: '700',
+                            whiteSpace: 'nowrap'
+                          }}>
+                            <span>🕒</span>
+                            <span>{emp.shift_timing_display || (emp.shift_start && emp.shift_end ? `${emp.shift_start} - ${emp.shift_end}` : '09:00 AM - 06:00 PM')}</span>
+                          </span>
+                          {emp.shift_name && (
+                            <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px', fontWeight: '600' }}>
+                              {emp.shift_name}
+                            </div>
+                          )}
                         </td>
 
                         {/* Passages */}
@@ -6126,6 +6146,7 @@ export default function EmployeeRegistry({
             borderRadius: '16px',
             width: '100%',
             maxWidth: '560px',
+            maxHeight: '90vh',
             boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
             border: '1px solid #e2e8f0',
             overflow: 'hidden',
@@ -6139,7 +6160,8 @@ export default function EmployeeRegistry({
               justifyContent: 'space-between',
               padding: '16px 20px',
               backgroundColor: '#f8fafc',
-              borderBottom: '1px solid #e2e8f0'
+              borderBottom: '1px solid #e2e8f0',
+              flexShrink: 0
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <div style={{
@@ -6180,8 +6202,26 @@ export default function EmployeeRegistry({
               </button>
             </div>
 
-            {/* Modal Body */}
-            <form onSubmit={handleSaveEmployeeModal} style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {/* Modal Form with Scrollable Content Body and Pinned Footer */}
+            <form
+              onSubmit={handleSaveEmployeeModal}
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                flex: 1,
+                minHeight: 0,
+                overflow: 'hidden'
+              }}
+            >
+              {/* Scrollable Form Content */}
+              <div style={{
+                padding: '20px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '16px',
+                overflowY: 'auto',
+                flex: 1
+              }}>
               {/* Employee ID & Photo Summary */}
               <div style={{
                 display: 'flex',
@@ -6636,14 +6676,17 @@ export default function EmployeeRegistry({
                 </div>
               </div>
 
-              {/* Modal Buttons */}
+              </div>
+
+              {/* Pinned Sticky Footer Bar */}
               <div style={{
                 display: 'flex',
                 justifyContent: 'flex-end',
                 gap: '10px',
-                marginTop: '10px',
-                paddingTop: '14px',
-                borderTop: '1px solid #e2e8f0'
+                padding: '12px 20px',
+                backgroundColor: '#f8fafc',
+                borderTop: '1px solid #e2e8f0',
+                flexShrink: 0
               }}>
                 <button
                   type="button"
