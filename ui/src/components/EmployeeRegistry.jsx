@@ -34,6 +34,7 @@ const processImageFile = (file) => {
 };
 
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import DispatchAlertEmailModal from './DispatchAlertEmailModal';
 import { LoadingSpinner, LoadingOverlay } from './LoadingSpinner';
 
 const DEPARTMENTS = [
@@ -89,6 +90,9 @@ export default function EmployeeRegistry({
     if (onSectionChange) onSectionChange(sec);
   };
 
+  // State for Dispatch Alert Email Modal
+  const [emailAlertModalData, setEmailAlertModalData] = useState(null);
+
   // -------------------------------------------------------------
   // ATTENDANCE & SHIFT LEDGER STATE
   // -------------------------------------------------------------
@@ -112,6 +116,33 @@ export default function EmployeeRegistry({
   const [extendedStatusFilter, setExtendedStatusFilter] = useState('all'); // 'all' | 'away' | 'returned'
   const [absencePolicyFilter, setAbsencePolicyFilter] = useState('all'); // 'all' | 'short' | 'extended'
   const [extendedSearch, setExtendedSearch] = useState('');
+
+  // Absence Policy threshold (editable directly in UI, default 60m, persisted in localStorage)
+  const [absencePolicyMinutes, setAbsencePolicyMinutes] = useState(() => {
+    try {
+      const saved = localStorage.getItem('godezk_absence_policy_minutes');
+      return saved ? Math.max(5, parseInt(saved, 10) || 60) : 60;
+    } catch (e) {
+      return 60;
+    }
+  });
+
+  // Absence Multi-Day Date Filter ('today' | 'yesterday' | '3d' | '7d' | 'custom')
+  const [absencePeriod, setAbsencePeriod] = useState('today');
+  const [absenceCustomStart, setAbsenceCustomStart] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+  const [absenceCustomEnd, setAbsenceCustomEnd] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+
+  // Absence Duration Filter ('all' | 'lt30' | '30to60' | 'gt60' | 'gt120' | 'gt180' | 'custom')
+  const [absenceDurationFilter, setAbsenceDurationFilter] = useState('all');
+  const [customDurationMins, setCustomDurationMins] = useState(60);
+  const [customDurationOp, setCustomDurationOp] = useState('gt'); // 'gt' | 'gte' | 'lt'
 
   useEffect(() => {
     ledgerDataRef.current = ledgerData;
@@ -433,10 +464,16 @@ export default function EmployeeRegistry({
       setLedgerSyncing(true);
     }
     try {
-      const res = await fetch(
-        `/api/attendance/ledger?date=${encodeURIComponent(ledgerDate)}&org_id=${encodeURIComponent(activeOrgId || '')}&_t=${Date.now()}`,
-        { cache: 'no-store' }
-      );
+      let url = `/api/attendance/ledger?org_id=${encodeURIComponent(activeOrgId || '')}&_t=${Date.now()}`;
+      if (activeSection === 'absent' && absentSubTab === 'extended_log' && absencePeriod !== 'today') {
+        url += `&period=${encodeURIComponent(absencePeriod)}`;
+        if (absencePeriod === 'custom') {
+          url += `&start_date=${encodeURIComponent(absenceCustomStart)}&end_date=${encodeURIComponent(absenceCustomEnd)}`;
+        }
+      } else {
+        url += `&date=${encodeURIComponent(ledgerDate)}`;
+      }
+      const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (reqId !== ledgerReqIdRef.current) return;
@@ -450,7 +487,7 @@ export default function EmployeeRegistry({
         setLedgerSyncing(false);
       }
     }
-  }, [ledgerDate, activeOrgId]);
+  }, [ledgerDate, activeOrgId, activeSection, absentSubTab, absencePeriod, absenceCustomStart, absenceCustomEnd]);
 
   // Reload with loading spinner whenever shift date or active organization changes
   useEffect(() => {
@@ -903,8 +940,22 @@ export default function EmployeeRegistry({
     return allAbsences.filter(item => {
       if (extendedStatusFilter === 'away' && item.status !== 'Currently Away') return false;
       if (extendedStatusFilter === 'returned' && item.status !== 'Returned') return false;
-      if (absencePolicyFilter === 'short' && (item.duration_minutes || 0) >= 60) return false;
-      if (absencePolicyFilter === 'extended' && (item.duration_minutes || 0) < 60) return false;
+      if (absencePolicyFilter === 'short' && (item.duration_minutes || 0) >= absencePolicyMinutes) return false;
+      if (absencePolicyFilter === 'extended' && (item.duration_minutes || 0) < absencePolicyMinutes) return false;
+
+      // Duration filter evaluation
+      const dur = item.duration_minutes || 0;
+      if (absenceDurationFilter === 'lt30' && dur >= 30) return false;
+      if (absenceDurationFilter === '30to60' && (dur < 30 || dur > 60)) return false;
+      if (absenceDurationFilter === 'gt60' && dur <= 60) return false;
+      if (absenceDurationFilter === 'gt120' && dur <= 120) return false;
+      if (absenceDurationFilter === 'gt180' && dur <= 180) return false;
+      if (absenceDurationFilter === 'custom') {
+        if (customDurationOp === 'gt' && dur <= customDurationMins) return false;
+        if (customDurationOp === 'gte' && dur < customDurationMins) return false;
+        if (customDurationOp === 'lt' && dur >= customDurationMins) return false;
+      }
+
       if (deptFilter !== 'all' && (item.department || 'General Staff') !== deptFilter) return false;
       if (extendedSearch.trim()) {
         const q = extendedSearch.toLowerCase();
@@ -915,21 +966,22 @@ export default function EmployeeRegistry({
       }
       return true;
     });
-  }, [allAbsences, extendedStatusFilter, absencePolicyFilter, deptFilter, extendedSearch]);
+  }, [allAbsences, extendedStatusFilter, absencePolicyFilter, absenceDurationFilter, customDurationMins, customDurationOp, absencePolicyMinutes, deptFilter, extendedSearch]);
 
   const extendedStats = useMemo(() => {
     const total = allAbsences.length;
     const away = allAbsences.filter(b => b.status === 'Currently Away').length;
     const returned = allAbsences.filter(b => b.status === 'Returned').length;
-    const shortBreaks = allAbsences.filter(b => (b.duration_minutes || 0) < 60).length;
-    const breaches = allAbsences.filter(b => (b.duration_minutes || 0) >= 60).length;
+    const shortBreaks = allAbsences.filter(b => (b.duration_minutes || 0) < absencePolicyMinutes).length;
+    const breaches = allAbsences.filter(b => (b.duration_minutes || 0) >= absencePolicyMinutes).length;
     let maxOverstay = 0;
     allAbsences.forEach(b => {
-      if ((b.overstay_minutes || 0) > maxOverstay) maxOverstay = b.overstay_minutes;
+      const overstay = Math.max(0, (b.duration_minutes || 0) - absencePolicyMinutes);
+      if (overstay > maxOverstay) maxOverstay = overstay;
     });
     const maxOverstayStr = maxOverstay > 0 ? (maxOverstay >= 60 ? `${Math.floor(maxOverstay / 60)}h ${maxOverstay % 60}m` : `${maxOverstay}m`) : '0m';
     return { total, away, returned, shortBreaks, breaches, maxOverstay, maxOverstayStr };
-  }, [allAbsences]);
+  }, [allAbsences, absencePolicyMinutes]);
 
   // Regular sorted visitors for 'details' tab
   const sortedVisitors = useMemo(() => {
@@ -2954,6 +3006,58 @@ export default function EmployeeRegistry({
                             >
                               🔍 Journey
                             </button>
+
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const isEarly = Boolean(emp.is_early_checkin);
+                                const isLate = Boolean(emp.is_late_arrival || (emp.check_in_time && emp.assigned_shift_start && emp.check_in_time > emp.assigned_shift_start));
+                                const alertType = isEarly ? 'early_checkin' : (isLate ? 'late_arrival' : 'general_alert');
+                                const alertPrefix = isEarly ? '⚡ Early Check-In Notification' : (isLate ? '⏰ Late Arrival Alert' : '📋 Shift Attendance Advisory');
+
+                                setEmailAlertModalData({
+                                  alertType: alertType,
+                                  subject: `${alertPrefix}: ${emp.name || emp.employee_id} (${emp.department || 'Staff'})`,
+                                  title: `${alertPrefix} — Medanta Operations`,
+                                  summary: isEarly
+                                    ? `Staff member ${emp.name || emp.employee_id} completed inbound biometric check-in prior to scheduled shift start time.`
+                                    : (isLate
+                                        ? `Staff member ${emp.name || emp.employee_id} arrived past scheduled shift start time.`
+                                        : `Daily shift movement and attendance record for ${emp.name || emp.employee_id}.`),
+                                  metadata: {
+                                    'Employee ID': emp.employee_id,
+                                    'Employee Name': emp.name || emp.employee_id,
+                                    'Department': emp.department || 'General Staff',
+                                    'Assigned Shift': emp.assigned_shift_display || emp.shift_window || '09:00 AM - 06:00 PM',
+                                    'First In (Check-In)': emp.check_in_display || '—',
+                                    'Final Out (Check-Out)': emp.check_out_display || '—',
+                                    'Working Time': emp.working_str || '0h 00m',
+                                    'Break Time': emp.break_str || '0h 00m',
+                                    'Productivity': `${prod}%`,
+                                    'Shift Status': emp.status || 'Active'
+                                  },
+                                  faceCrop: (emp.crops && emp.crops[0]) || emp.face_crop || avatar || null,
+                                  bodyCrop: emp.body_b64 || emp.photo_b64 || avatar || null
+                                });
+                              }}
+                              style={{
+                                padding: '4px 8px',
+                                borderRadius: '6px',
+                                border: '1px solid #fed7aa',
+                                backgroundColor: '#fff7ed',
+                                color: '#ea580c',
+                                fontSize: '11px',
+                                fontWeight: '700',
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '3px'
+                              }}
+                              title="Dispatch attendance email alert (Late arrival / Early check-in)"
+                            >
+                              ✉ Alert
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -3057,24 +3161,101 @@ export default function EmployeeRegistry({
             </div>
 
             {absentSubTab === 'extended_log' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '11px', fontWeight: '800', color: '#991b1b' }}>📅 Shift Date:</span>
-                <input
-                  type="date"
-                  value={ledgerDate}
-                  onChange={(e) => setLedgerDate(e.target.value)}
-                  style={{
-                    padding: '5px 10px',
-                    borderRadius: '7px',
-                    border: '1px solid #fca5a5',
-                    fontSize: '11px',
-                    fontWeight: '700',
-                    backgroundColor: '#ffffff',
-                    color: '#991b1b',
-                    cursor: 'pointer',
-                    outline: 'none'
-                  }}
-                />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                {/* Period Pills: Today, Yesterday, Last 3 Days, Last 7 Days, Custom */}
+                <div style={{ display: 'flex', backgroundColor: '#fee2e2', borderRadius: '8px', padding: '2px', gap: '2px' }}>
+                  {[
+                    ['today', 'Today'],
+                    ['yesterday', 'Yesterday'],
+                    ['3d', 'Last 3 Days'],
+                    ['7d', 'Last 7 Days'],
+                    ['custom', 'Custom Range']
+                  ].map(([id, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setAbsencePeriod(id)}
+                      style={{
+                        padding: '4px 10px',
+                        borderRadius: '6px',
+                        border: 'none',
+                        fontSize: '11px',
+                        fontWeight: '800',
+                        cursor: 'pointer',
+                        backgroundColor: absencePeriod === id ? '#b91c1c' : 'transparent',
+                        color: absencePeriod === id ? '#ffffff' : '#991b1b',
+                        boxShadow: absencePeriod === id ? '0 1px 2px rgba(185, 28, 28, 0.3)' : 'none',
+                        transition: 'all 0.15s'
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Single Date Picker for Today / Yesterday */}
+                {(absencePeriod === 'today' || absencePeriod === 'yesterday') && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '11px', fontWeight: '800', color: '#991b1b' }}>📅 Shift Date:</span>
+                    <input
+                      type="date"
+                      value={ledgerDate}
+                      onChange={(e) => setLedgerDate(e.target.value)}
+                      style={{
+                        padding: '5px 10px',
+                        borderRadius: '7px',
+                        border: '1px solid #fca5a5',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        backgroundColor: '#ffffff',
+                        color: '#991b1b',
+                        cursor: 'pointer',
+                        outline: 'none'
+                      }}
+                    />
+                  </div>
+                )}
+
+                {/* Multi-Day Range Pickers for Custom Range */}
+                {absencePeriod === 'custom' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '11px', fontWeight: '800', color: '#991b1b' }}>From:</span>
+                    <input
+                      type="date"
+                      value={absenceCustomStart}
+                      onChange={(e) => setAbsenceCustomStart(e.target.value)}
+                      style={{
+                        padding: '4px 8px',
+                        borderRadius: '6px',
+                        border: '1px solid #fca5a5',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        backgroundColor: '#ffffff',
+                        color: '#991b1b',
+                        cursor: 'pointer',
+                        outline: 'none'
+                      }}
+                    />
+                    <span style={{ fontSize: '11px', fontWeight: '800', color: '#991b1b' }}>To:</span>
+                    <input
+                      type="date"
+                      value={absenceCustomEnd}
+                      onChange={(e) => setAbsenceCustomEnd(e.target.value)}
+                      style={{
+                        padding: '4px 8px',
+                        borderRadius: '6px',
+                        border: '1px solid #fca5a5',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        backgroundColor: '#ffffff',
+                        color: '#991b1b',
+                        cursor: 'pointer',
+                        outline: 'none'
+                      }}
+                    />
+                  </div>
+                )}
+
                 {ledgerLoading && (
                   <LoadingSpinner size={13} color="#b91c1c" trackColor="rgba(185, 28, 28, 0.2)" />
                 )}
@@ -3495,11 +3676,11 @@ export default function EmployeeRegistry({
                     <div style={{ fontSize: '15px', fontWeight: '900', color: '#b91c1c' }}>{extendedStats.total} Records</div>
                   </div>
                   <div style={{ backgroundColor: '#ffffff', border: '1px solid #86efac', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
-                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#166534', textTransform: 'uppercase' }}>Short Breaks (&lt;60m)</div>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#166534', textTransform: 'uppercase' }}>Short Breaks (&lt;{absencePolicyMinutes}m)</div>
                     <div style={{ fontSize: '15px', fontWeight: '900', color: '#15803d' }}>{extendedStats.shortBreaks} Breaks</div>
                   </div>
                   <div style={{ backgroundColor: '#ffffff', border: '1px solid #fca5a5', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
-                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#991b1b', textTransform: 'uppercase' }}>Policy Breaches (&gt;60m)</div>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#991b1b', textTransform: 'uppercase' }}>Policy Breaches (≥{absencePolicyMinutes}m)</div>
                     <div style={{ fontSize: '15px', fontWeight: '900', color: '#b91c1c' }}>{extendedStats.breaches} Staff</div>
                   </div>
                   <div style={{ backgroundColor: '#ffffff', border: '1px solid #fed7aa', padding: '6px 12px', borderRadius: '8px', textAlign: 'center' }}>
@@ -3514,121 +3695,267 @@ export default function EmployeeRegistry({
               </div>
 
               {/* Extended Absence Filter Bar */}
-              <div style={{ padding: '10px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', backgroundColor: '#fafbfc' }}>
-                {/* Search */}
-                <div style={{ position: 'relative' }}>
-                  <svg style={{ position: 'absolute', left: '9px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                  <input
-                    value={extendedSearch}
-                    onChange={e => setExtendedSearch(e.target.value)}
-                    placeholder="Search employee name, ID..."
-                    style={{ paddingLeft: '28px', paddingRight: '10px', paddingTop: '6px', paddingBottom: '6px', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', color: '#0f172a', outline: 'none', width: '220px' }}
-                  />
-                </div>
+              <div style={{ padding: '10px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', flexDirection: 'column', gap: '10px', backgroundColor: '#fafbfc' }}>
+                {/* Row 1: Search, Policy Sub-filter, Status Sub-filter, Department, Policy Setup Widget, Excel Export */}
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  {/* Search */}
+                  <div style={{ position: 'relative' }}>
+                    <svg style={{ position: 'absolute', left: '9px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+                    <input
+                      value={extendedSearch}
+                      onChange={e => setExtendedSearch(e.target.value)}
+                      placeholder="Search employee name, ID..."
+                      style={{ paddingLeft: '28px', paddingRight: '10px', paddingTop: '6px', paddingBottom: '6px', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', color: '#0f172a', outline: 'none', width: '200px' }}
+                    />
+                  </div>
 
-                {/* Policy Sub-Filter Pills */}
-                <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
-                  {[
-                    ['all', `All (${allAbsences.length})`],
-                    ['short', `Short <60m (${extendedStats.shortBreaks})`],
-                    ['extended', `Breaches >60m (${extendedStats.breaches})`]
-                  ].map(([id, label]) => (
-                    <button
-                      key={id}
-                      onClick={() => setAbsencePolicyFilter(id)}
+                  {/* Policy Sub-Filter Pills */}
+                  <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
+                    {[
+                      ['all', `All (${allAbsences.length})`],
+                      ['short', `Short <${absencePolicyMinutes}m (${extendedStats.shortBreaks})`],
+                      ['extended', `Breaches ≥${absencePolicyMinutes}m (${extendedStats.breaches})`]
+                    ].map(([id, label]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setAbsencePolicyFilter(id)}
+                        style={{
+                          padding: '3px 10px',
+                          borderRadius: '5px',
+                          border: 'none',
+                          fontSize: '11px',
+                          fontWeight: '700',
+                          cursor: 'pointer',
+                          backgroundColor: absencePolicyFilter === id ? '#ffffff' : 'transparent',
+                          color: absencePolicyFilter === id ? '#0284c7' : '#64748b',
+                          boxShadow: absencePolicyFilter === id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Status Sub-Filter Pills */}
+                  <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
+                    {[
+                      ['all', `All (${allAbsences.length})`],
+                      ['away', `🔴 Outside (${extendedStats.away})`],
+                      ['returned', `✓ Returned (${extendedStats.returned})`]
+                    ].map(([id, label]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setExtendedStatusFilter(id)}
+                        style={{
+                          padding: '3px 10px',
+                          borderRadius: '5px',
+                          border: 'none',
+                          fontSize: '11px',
+                          fontWeight: '700',
+                          cursor: 'pointer',
+                          backgroundColor: extendedStatusFilter === id ? '#ffffff' : 'transparent',
+                          color: extendedStatusFilter === id ? '#b91c1c' : '#64748b',
+                          boxShadow: extendedStatusFilter === id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Department Dropdown */}
+                  <select
+                    value={deptFilter}
+                    onChange={e => setDeptFilter(e.target.value)}
+                    style={{ padding: '6px 10px', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', color: '#334155', outline: 'none', cursor: 'pointer' }}
+                  >
+                    <option value="all">All Departments</option>
+                    {Object.entries(deptCounts).sort((a, b) => b[1] - a[1]).map(([d, c]) => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+
+                  {/* In-UI Policy Rule Control Widget */}
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    backgroundColor: '#fff1f2',
+                    border: '1px solid #fecdd3',
+                    borderRadius: '8px',
+                    padding: '4px 8px'
+                  }}>
+                    <span style={{ fontSize: '11px', fontWeight: '800', color: '#9f1239', whiteSpace: 'nowrap' }}>
+                      ⚙️ Policy: Max
+                    </span>
+                    <input
+                      type="number"
+                      min="5"
+                      max="480"
+                      value={absencePolicyMinutes}
+                      onChange={(e) => {
+                        const val = Math.max(5, parseInt(e.target.value, 10) || 15);
+                        setAbsencePolicyMinutes(val);
+                        try { localStorage.setItem('godezk_absence_policy_minutes', String(val)); } catch (err) {}
+                      }}
                       style={{
-                        padding: '3px 10px',
-                        borderRadius: '5px',
-                        border: 'none',
+                        width: '42px',
+                        padding: '2px 4px',
+                        textAlign: 'center',
+                        fontWeight: '900',
                         fontSize: '11px',
+                        border: '1px solid #e11d48',
+                        borderRadius: '5px',
+                        color: '#9f1239',
+                        backgroundColor: '#ffffff',
+                        outline: 'none'
+                      }}
+                      title="Directly edit allowed policy break minutes"
+                    />
+                    <span style={{ fontSize: '11px', fontWeight: '800', color: '#9f1239' }}>m</span>
+                    <div style={{ display: 'flex', gap: '2px' }}>
+                      {[30, 45, 60, 90, 120].map(mins => (
+                        <button
+                          key={mins}
+                          type="button"
+                          onClick={() => {
+                            setAbsencePolicyMinutes(mins);
+                            try { localStorage.setItem('godezk_absence_policy_minutes', String(mins)); } catch (err) {}
+                          }}
+                          style={{
+                            padding: '2px 5px',
+                            borderRadius: '4px',
+                            border: absencePolicyMinutes === mins ? '1px solid #be123c' : '1px solid #fecdd3',
+                            backgroundColor: absencePolicyMinutes === mins ? '#be123c' : '#ffffff',
+                            color: absencePolicyMinutes === mins ? '#ffffff' : '#9f1239',
+                            fontSize: '10px',
+                            fontWeight: '800',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          {mins}m
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Excel Export Button */}
+                  <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <a
+                      href={`/api/attendance/export/absences?date=${ledgerDate}&period=${absencePeriod}&start_date=${absenceCustomStart}&end_date=${absenceCustomEnd}&org=${activeOrgId || 'medanta'}`}
+                      download={`absence_audit_${activeOrgId || 'medanta'}_${absencePeriod}.xlsx`}
+                      style={{
+                        padding: '5px 12px',
+                        borderRadius: '6px',
+                        border: '1px solid #ea580c',
+                        backgroundColor: '#ea580c',
+                        color: '#ffffff',
+                        fontSize: '12px',
                         fontWeight: '700',
                         cursor: 'pointer',
-                        backgroundColor: absencePolicyFilter === id ? '#ffffff' : 'transparent',
-                        color: absencePolicyFilter === id ? '#0284c7' : '#64748b',
-                        boxShadow: absencePolicyFilter === id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        textDecoration: 'none',
+                        boxShadow: '0 1px 2px rgba(234, 88, 12, 0.2)'
                       }}
+                      title="Export Shift Absence & Break Audit Log to Excel"
                     >
-                      {label}
-                    </button>
-                  ))}
+                      <span>📥</span>
+                      <span>Export to Excel</span>
+                    </a>
+                  </div>
                 </div>
 
-                {/* Status Sub-Filter Pills */}
-                <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px' }}>
-                  {[
-                    ['all', `All Statuses (${allAbsences.length})`],
-                    ['away', `🔴 Still Outside (${extendedStats.away})`],
-                    ['returned', `✓ Returned (${extendedStats.returned})`]
-                  ].map(([id, label]) => (
-                    <button
-                      key={id}
-                      onClick={() => setExtendedStatusFilter(id)}
-                      style={{
-                        padding: '3px 10px',
-                        borderRadius: '5px',
-                        border: 'none',
-                        fontSize: '11px',
-                        fontWeight: '700',
-                        cursor: 'pointer',
-                        backgroundColor: extendedStatusFilter === id ? '#ffffff' : 'transparent',
-                        color: extendedStatusFilter === id ? '#b91c1c' : '#64748b',
-                        boxShadow: extendedStatusFilter === id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
-                      }}
-                    >
-                      {label}
-                    </button>
-                  ))}
+                {/* Row 2: Away Duration Filter Pills */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingTop: '8px', borderTop: '1px dashed #e2e8f0', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '11px', fontWeight: '800', color: '#475569', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    ⏳ Total Away Duration:
+                  </span>
+                  <div style={{ display: 'flex', backgroundColor: '#f1f5f9', borderRadius: '8px', padding: '3px', gap: '2px', flexWrap: 'wrap' }}>
+                    {[
+                      ['all', 'All'],
+                      ['lt30', '< 30m'],
+                      ['30to60', '30m – 60m'],
+                      ['gt60', '> 1 hr'],
+                      ['gt120', '> 2 hrs'],
+                      ['gt180', '> 3 hrs'],
+                      ['custom', 'Custom ⏱️']
+                    ].map(([id, label]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setAbsenceDurationFilter(id)}
+                        style={{
+                          padding: '3px 9px',
+                          borderRadius: '5px',
+                          border: 'none',
+                          fontSize: '11px',
+                          fontWeight: '700',
+                          cursor: 'pointer',
+                          backgroundColor: absenceDurationFilter === id ? '#ffffff' : 'transparent',
+                          color: absenceDurationFilter === id ? '#0f766e' : '#64748b',
+                          boxShadow: absenceDurationFilter === id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none'
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Custom Duration Selector */}
+                  {absenceDurationFilter === 'custom' && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', backgroundColor: '#f0fdfa', padding: '3px 8px', borderRadius: '6px', border: '1px solid #ccfbf1' }}>
+                      <span style={{ fontSize: '11px', fontWeight: '700', color: '#0f766e' }}>Filter:</span>
+                      <select
+                        value={customDurationOp}
+                        onChange={e => setCustomDurationOp(e.target.value)}
+                        style={{ padding: '2px 4px', borderRadius: '4px', border: '1px solid #99f6e4', fontSize: '11px', fontWeight: '700', color: '#0f766e', backgroundColor: '#fff', outline: 'none', cursor: 'pointer' }}
+                      >
+                        <option value="gt">Greater than (&gt;)</option>
+                        <option value="gte">Greater or equal (≥)</option>
+                        <option value="lt">Less than (&lt;)</option>
+                      </select>
+                      <input
+                        type="number"
+                        min="1"
+                        max="720"
+                        value={customDurationMins}
+                        onChange={e => setCustomDurationMins(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                        style={{ width: '45px', padding: '2px 4px', textAlign: 'center', fontWeight: '800', fontSize: '11px', border: '1px solid #99f6e4', borderRadius: '4px', color: '#0f766e', outline: 'none' }}
+                      />
+                      <span style={{ fontSize: '11px', fontWeight: '700', color: '#0f766e' }}>mins</span>
+                    </div>
+                  )}
+
+                  <span style={{ marginLeft: 'auto', fontSize: '11px', color: '#64748b' }}>
+                    Showing <strong>{filteredExtended.length}</strong> of <strong>{allAbsences.length}</strong> events
+                    {ledgerData?.date_range_label && ` · ${ledgerData.date_range_label}`}
+                  </span>
                 </div>
-
-                {/* Department Dropdown */}
-                <select
-                  value={deptFilter}
-                  onChange={e => setDeptFilter(e.target.value)}
-                  style={{ padding: '6px 10px', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', color: '#334155', outline: 'none', cursor: 'pointer' }}
-                >
-                  <option value="all">All Departments</option>
-                  {Object.entries(deptCounts).sort((a, b) => b[1] - a[1]).map(([d, c]) => (
-                    <option key={d} value={d}>{d}</option>
-                  ))}
-                </select>
-
-                <span style={{ marginLeft: 'auto', fontSize: '11px', color: '#64748b', fontWeight: '600' }}>
-                  Policy: <strong>Max 60m / Break</strong> · Shift Date: <strong>{ledgerDate}</strong>
-                </span>
               </div>
 
               {/* Extended Absence Log Table */}
-              <div style={{ overflowX: 'auto', position: 'relative', minHeight: ledgerLoading ? '200px' : undefined }}>
+              <div style={{ overflowX: 'auto', position: 'relative' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
                   <thead>
                     <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
-                      {['Employee ID', 'Employee / Face', 'Department', 'Departed Time (Exit Gate)', 'Returned Time (Entry Gate)', 'Total Away Duration', 'Allowed Policy', 'Overstay Exceeded', 'Status', 'Actions'].map(h => (
+                      {['Shift Date', 'Employee ID', 'Employee / Face', 'Department', 'Departed Time (Exit Gate)', 'Returned Time (Entry Gate)', 'Total Away Duration', 'Allowed Policy', 'Overstay Exceeded', 'Status', 'Actions'].map(h => (
                         <th key={h} style={{ padding: '10px 14px', fontSize: '11px', fontWeight: '800', color: '#475569', whiteSpace: 'nowrap' }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {!ledgerData && ledgerLoading ? (
+                    {filteredExtended.length === 0 ? (
                       <tr>
-                        <td colSpan="10" style={{ padding: '44px 20px', textAlign: 'center' }}>
-                          <LoadingSpinner
-                            size={30}
-                            color="#b91c1c"
-                            trackColor="rgba(185, 28, 28, 0.2)"
-                            layout="stacked"
-                            label={`Loading absence & break audit log for ${ledgerDate}...`}
-                            sublabel="Querying database records"
-                          />
-                        </td>
-                      </tr>
-                    ) : filteredExtended.length === 0 ? (
-                      <tr>
-                        <td colSpan="10" style={{ padding: '36px', textAlign: 'center', color: '#64748b' }}>
+                        <td colSpan="11" style={{ padding: '36px', textAlign: 'center', color: '#64748b' }}>
                           <div style={{ fontSize: '14px', fontWeight: '700', color: '#059669', marginBottom: '4px' }}>
-                            ✓ No Absences or Breaks Recorded for This Shift
+                            ✓ No Absences or Breaks Recorded for Selected Filter
                           </div>
                           <div style={{ fontSize: '12px', color: '#94a3b8' }}>
-                            All employee breaks during this shift will appear here with departure and return checkpoints.
+                            All employee breaks during this period will appear here with departure and return checkpoints.
                           </div>
                         </td>
                       </tr>
@@ -3638,8 +3965,8 @@ export default function EmployeeRegistry({
                         const thumb = item.photo_b64 || matchedVis?.crops?.[0] || matchedVis?.photo_b64 || null;
                         const isAway = item.status === 'Currently Away';
                         const durStr = item.duration_str || `${item.duration_minutes || 0}m`;
-                        const overstayMins = item.overstay_minutes || Math.max(0, (item.duration_minutes || 0) - 60);
-                        const overstayStr = item.overstay_str || `+${overstayMins}m`;
+                        const overstayMins = Math.max(0, (item.duration_minutes || 0) - absencePolicyMinutes);
+                        const overstayStr = `+${overstayMins}m`;
 
                         return (
                           <tr
@@ -3654,80 +3981,59 @@ export default function EmployeeRegistry({
                               transition: 'background-color 0.1s ease'
                             }}
                           >
-                            {/* Employee ID */}
+                            {/* Shift Date */}
                             <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
                               <span style={{
-                                fontFamily: 'var(--font-mono)',
+                                padding: '3px 8px',
+                                borderRadius: '6px',
                                 fontSize: '11px',
-                                fontWeight: '700',
-                                color: '#0284c7'
+                                fontWeight: '800',
+                                backgroundColor: '#f1f5f9',
+                                color: '#334155',
+                                border: '1px solid #cbd5e1',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px'
                               }}>
+                                📅 {item.date_display || item.date || ledgerDate}
+                              </span>
+                            </td>
+
+                            {/* ID */}
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                              <span style={{ fontFamily: 'var(--font-mono)', fontWeight: '800', color: '#0284c7' }}>
                                 {item.employee_id}
                               </span>
                             </td>
 
-                            {/* Employee Avatar & Name */}
-                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                <div style={{
-                                  width: '38px',
-                                  height: '38px',
-                                  borderRadius: '7px',
-                                  overflow: 'hidden',
-                                  border: isAway ? '1.5px solid #ef4444' : '1.5px solid #cbd5e1',
-                                  backgroundColor: '#fff7ed',
-                                  flexShrink: 0,
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center'
-                                }}>
-                                  {thumb ? (
-                                    <img
-                                      src={thumb.startsWith('data:') ? thumb : `data:image/jpeg;base64,${thumb}`}
-                                      alt={item.employee_id}
-                                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                                    />
-                                  ) : (
-                                    <span style={{ fontSize: '11px', fontWeight: '800', color: '#9a3412' }}>
-                                      {(item.name || item.employee_id).slice(0, 2).toUpperCase()}
-                                    </span>
-                                  )}
-                                </div>
-
+                            {/* Face / Name */}
+                            <td style={{ padding: '10px 14px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                {thumb ? (
+                                  <img
+                                    src={thumb}
+                                    alt={item.name}
+                                    style={{ width: '32px', height: '32px', borderRadius: '50%', objectFit: 'cover', border: '1px solid #e2e8f0' }}
+                                  />
+                                ) : (
+                                  <div style={{
+                                    width: '32px',
+                                    height: '32px',
+                                    borderRadius: '50%',
+                                    backgroundColor: '#fee2e2',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    fontWeight: '800',
+                                    color: '#b91c1c',
+                                    fontSize: '11px'
+                                  }}>
+                                    {(item.name || item.employee_id || 'U')[0].toUpperCase()}
+                                  </div>
+                                )}
                                 <div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span style={{ fontWeight: '700', color: '#0f172a' }}>
-                                      {item.name || item.employee_id}
-                                    </span>
-                                    {isAway ? (
-                                      <span style={{
-                                        fontSize: '9px',
-                                        fontWeight: '800',
-                                        padding: '1px 5px',
-                                        borderRadius: '4px',
-                                        backgroundColor: '#fee2e2',
-                                        color: '#dc2626',
-                                        border: '1px solid #fca5a5'
-                                      }}>
-                                        ● AWAY NOW
-                                      </span>
-                                    ) : (
-                                      <span style={{
-                                        fontSize: '9px',
-                                        fontWeight: '800',
-                                        padding: '1px 5px',
-                                        borderRadius: '4px',
-                                        backgroundColor: '#dcfce7',
-                                        color: '#15803d',
-                                        border: '1px solid #86efac'
-                                      }}>
-                                        ✓ RETURNED
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div style={{ fontSize: '10px', color: '#64748b', marginTop: '1px' }}>
-                                    {item.designation || 'Staff Member'}
-                                  </div>
+                                  <div style={{ fontWeight: '700', color: '#0f172a' }}>{item.name || item.employee_id}</div>
+                                  <div style={{ fontSize: '10px', color: '#94a3b8' }}>Verified Sighting</div>
                                 </div>
                               </div>
                             </td>
@@ -3736,11 +4042,12 @@ export default function EmployeeRegistry({
                             <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
                               <span style={{
                                 padding: '3px 8px',
-                                borderRadius: '6px',
+                                borderRadius: '5px',
                                 fontSize: '11px',
-                                fontWeight: '700',
-                                backgroundColor: '#f1f5f9',
-                                color: '#334155'
+                                fontWeight: '600',
+                                backgroundColor: '#f8fafc',
+                                border: '1px solid #e2e8f0',
+                                color: '#475569'
                               }}>
                                 {item.department || 'General Staff'}
                               </span>
@@ -3748,43 +4055,42 @@ export default function EmployeeRegistry({
 
                             {/* Departed Time (Exit Gate) */}
                             <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#b91c1c', fontWeight: '700' }}>
-                                {item.exit_display || fmtTime(item.exit_time)}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                <span style={{ width: '7px', height: '7px', borderRadius: '50%', backgroundColor: '#ef4444' }} />
+                                <span style={{ fontWeight: '700', color: '#b91c1c', fontFamily: 'var(--font-mono)' }}>
+                                  {item.exit_display || fmtTime(item.exit_time)}
+                                </span>
                               </div>
-                              <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                              <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '2px' }}>
                                 {item.exit_camera_name || 'Exit Gate'}
                               </div>
                             </td>
 
                             {/* Returned Time (Entry Gate) */}
                             <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                              {isAway ? (
-                                <div>
-                                  <span style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: '11px',
-                                    fontWeight: '800',
-                                    color: '#ea580c',
-                                    backgroundColor: '#fff7ed',
-                                    padding: '2px 8px',
-                                    borderRadius: '5px',
-                                    border: '1px solid #fed7aa'
-                                  }}>
-                                    🔴 Still Outside
-                                  </span>
+                              {item.entry_time ? (
+                                <>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                    <span style={{ width: '7px', height: '7px', borderRadius: '50%', backgroundColor: '#10b981' }} />
+                                    <span style={{ fontWeight: '700', color: '#15803d', fontFamily: 'var(--font-mono)' }}>
+                                      {item.entry_display || fmtTime(item.entry_time)}
+                                    </span>
+                                  </div>
                                   <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '2px' }}>
-                                    Has not entered yet
+                                    {item.entry_camera_name || 'Inbound Checkpoint'}
                                   </div>
-                                </div>
+                                </>
                               ) : (
-                                <div>
-                                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#166534', fontWeight: '700' }}>
-                                    {item.entry_display || fmtTime(item.entry_time)}
-                                  </div>
-                                  <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                                    {item.entry_camera_name || 'Entry Gate'}
-                                  </div>
-                                </div>
+                                <span style={{
+                                  padding: '3px 8px',
+                                  borderRadius: '5px',
+                                  fontSize: '11px',
+                                  fontWeight: '800',
+                                  backgroundColor: '#fee2e2',
+                                  color: '#dc2626'
+                                }}>
+                                  Still Outside
+                                </span>
                               )}
                             </td>
 
@@ -3796,13 +4102,13 @@ export default function EmployeeRegistry({
                                 gap: '6px',
                                 padding: '4px 10px',
                                 borderRadius: '6px',
-                                backgroundColor: (item.duration_minutes || 0) >= 60 ? '#fee2e2' : '#f0fdf4',
-                                color: (item.duration_minutes || 0) >= 60 ? '#b91c1c' : '#15803d',
+                                backgroundColor: (item.duration_minutes || 0) >= absencePolicyMinutes ? '#fee2e2' : '#f0fdf4',
+                                color: (item.duration_minutes || 0) >= absencePolicyMinutes ? '#b91c1c' : '#15803d',
                                 fontWeight: '800',
                                 fontFamily: 'var(--font-mono)',
                                 fontSize: '12px'
                               }}>
-                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: (item.duration_minutes || 0) >= 60 ? '#dc2626' : '#16a34a' }} />
+                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: (item.duration_minutes || 0) >= absencePolicyMinutes ? '#dc2626' : '#16a34a' }} />
                                 <span>{durStr}</span>
                               </div>
                             </td>
@@ -3817,7 +4123,7 @@ export default function EmployeeRegistry({
                                 backgroundColor: '#f1f5f9',
                                 color: '#475569'
                               }}>
-                                60m Policy
+                                {absencePolicyMinutes}m Policy
                               </span>
                             </td>
 
@@ -3825,94 +4131,105 @@ export default function EmployeeRegistry({
                             <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
                               {overstayMins > 0 ? (
                                 <span style={{
-                                  padding: '3px 9px',
+                                  padding: '4px 8px',
                                   borderRadius: '6px',
                                   fontSize: '11px',
                                   fontWeight: '800',
-                                  backgroundColor: '#fef2f2',
-                                  color: '#dc2626',
-                                  border: '1px solid #fca5a5',
-                                  fontFamily: 'var(--font-mono)'
+                                  fontFamily: 'var(--font-mono)',
+                                  backgroundColor: '#fee2e2',
+                                  color: '#b91c1c',
+                                  border: '1px solid #fca5a5'
                                 }}>
-                                  {overstayStr} overstay
+                                  ⚠️ {overstayStr}
                                 </span>
                               ) : (
-                                <span style={{
-                                  padding: '3px 9px',
-                                  borderRadius: '6px',
-                                  fontSize: '11px',
-                                  fontWeight: '700',
-                                  backgroundColor: '#f0fdf4',
-                                  color: '#166534',
-                                  border: '1px solid #bbf7d0',
-                                  fontFamily: 'var(--font-mono)'
-                                }}>
-                                  ✓ Within Policy
-                                </span>
+                                <span style={{ color: '#94a3b8', fontSize: '11px' }}>—</span>
                               )}
                             </td>
 
                             {/* Status */}
                             <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                              {isAway ? (
-                                <span style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '5px',
-                                  padding: '3px 8px',
-                                  borderRadius: '6px',
-                                  fontSize: '11px',
-                                  fontWeight: '800',
-                                  backgroundColor: '#fff7ed',
-                                  color: '#c2410c',
-                                  border: '1px solid #fed7aa'
-                                }}>
-                                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#ea580c' }} />
-                                  Currently Away
-                                </span>
-                              ) : (
-                                <span style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '5px',
-                                  padding: '3px 8px',
-                                  borderRadius: '6px',
-                                  fontSize: '11px',
-                                  fontWeight: '800',
-                                  backgroundColor: '#f0fdf4',
-                                  color: '#166534',
-                                  border: '1px solid #bbf7d0'
-                                }}>
-                                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#16a34a' }} />
-                                  Returned
-                                </span>
-                              )}
+                              <span style={{
+                                padding: '4px 9px',
+                                borderRadius: '6px',
+                                fontSize: '11px',
+                                fontWeight: '800',
+                                backgroundColor: isAway ? '#fee2e2' : '#f0fdf4',
+                                color: isAway ? '#dc2626' : '#15803d'
+                              }}>
+                                {isAway ? '🔴 Currently Away' : '✓ Returned'}
+                              </span>
                             </td>
 
                             {/* Actions */}
                             <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (onSelectEmployee) onSelectEmployee(item.employee_id);
-                                }}
-                                style={{
-                                  padding: '4px 10px',
-                                  borderRadius: '6px',
-                                  backgroundColor: '#fee2e2',
-                                  border: '1px solid #fca5a5',
-                                  fontSize: '11px',
-                                  cursor: 'pointer',
-                                  color: '#991b1b',
-                                  fontWeight: '800',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px'
-                                }}
-                                title="Inspect biometric timeline and sighting journey"
-                              >
-                                View Journey ➔
-                              </button>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (onSelectEmployee) onSelectEmployee(item.employee_id);
+                                  }}
+                                  style={{
+                                    padding: '4px 10px',
+                                    borderRadius: '6px',
+                                    backgroundColor: '#fee2e2',
+                                    border: '1px solid #fca5a5',
+                                    fontSize: '11px',
+                                    cursor: 'pointer',
+                                    color: '#991b1b',
+                                    fontWeight: '800',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                  }}
+                                  title="Inspect biometric timeline and sighting journey"
+                                >
+                                  View Journey ➔
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const isOverstay = (item.duration_minutes || 0) >= absencePolicyMinutes;
+                                    setEmailAlertModalData({
+                                      alertType: 'absence_breach',
+                                      subject: `🚨 Medanta Alert: Staff Absence Policy ${isOverstay ? 'Breach' : 'Advisory'} — ${item.name || item.employee_id} (${item.department || 'General Staff'})`,
+                                      title: 'Shift Working Hours — Staff Absence Policy Advisory',
+                                      summary: `Staff member ${item.name || item.employee_id} recorded an away duration of ${durStr} during active shift hours (${absencePolicyMinutes}m Policy).`,
+                                      metadata: {
+                                        'Employee ID': item.employee_id,
+                                        'Employee Name': item.name || item.employee_id,
+                                        'Department': item.department || 'General Staff',
+                                        'Departed Time': `${item.exit_display || fmtTime(item.exit_time)} (${item.exit_camera_name || 'Exit Gate'})`,
+                                        'Returned Time': isAway ? 'Still Outside (Has not returned)' : `${item.entry_display || fmtTime(item.entry_time)} (${item.entry_camera_name || 'Entry Gate'})`,
+                                        'Away Duration': durStr,
+                                        'Allowed Policy': `${absencePolicyMinutes}m Policy`,
+                                        'Compliance Status': isOverstay ? 'Policy Overstay Breach' : 'Within Policy'
+                                      },
+                                      faceCrop: matchedVis?.crops?.[0] || thumb || null,
+                                      bodyCrop: matchedVis?.body_b64 || matchedVis?.photo_b64 || item.photo_b64 || thumb || null
+                                    });
+                                  }}
+                                  style={{
+                                    padding: '4px 10px',
+                                    borderRadius: '6px',
+                                    backgroundColor: '#fff7ed',
+                                    border: '1px solid #fdba74',
+                                    fontSize: '11px',
+                                    cursor: 'pointer',
+                                    color: '#c2410c',
+                                    fontWeight: '800',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                  }}
+                                  title="Dispatch email advisory regarding this absence via Email Microservice (Port 31040)"
+                                >
+                                  ✉ Alert
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -3922,11 +4239,10 @@ export default function EmployeeRegistry({
                 </table>
                 <LoadingOverlay
                   visible={Boolean(ledgerData && ledgerLoading)}
-                  spinnerSize={28}
+                  spinnerSize={30}
                   color="#b91c1c"
                   trackColor="rgba(185, 28, 28, 0.2)"
-                  message={`Loading absence audit log for ${ledgerDate}...`}
-                  subtext="Querying database records"
+                  message={`Loading absences & breaks...`}
                 />
               </div>
             </div>
@@ -6084,6 +6400,13 @@ export default function EmployeeRegistry({
           </div>
         </div>
       )}
+
+      {/* Centralized Alert Email Dispatch Modal */}
+      <DispatchAlertEmailModal
+        isOpen={Boolean(emailAlertModalData)}
+        onClose={() => setEmailAlertModalData(null)}
+        alertData={emailAlertModalData}
+      />
     </div>
   );
 }
